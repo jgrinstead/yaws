@@ -112,6 +112,13 @@
           nslookup_pref = [inet]              % [inet | inet6]
          }).
 
+
+-ifdef(HAVE_SSL_HONOR_CIPHER_ORDER).
+-define(HONOR_CIPHER_ORDER, true).
+-else.
+-define(HONOR_CIPHER_ORDER, undefined).
+-endif.
+
 -record(ssl, {
           keyfile,
           certfile,
@@ -122,7 +129,8 @@
           cacertfile,
           ciphers,
           cachetimeout,
-          secure_renegotiate = false
+          secure_renegotiate = false,
+          honor_cipher_order = ?HONOR_CIPHER_ORDER
          }).
 
 
