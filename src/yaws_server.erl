@@ -1191,10 +1191,10 @@ aloop(CliSock, {IP,Port}=IPPort, GS, Num) ->
 				    {true, ProxyIP} ->
 					ProxyIP;
 				    {false, undefined} ->
-					{IP,Port};
+					IPPort;
 				    _ ->
 					error_logger:format("Ignoring extraneous PROXY header", []),
-					{IP,Port}
+					IPPort
 				end,
             PeerIPPort = {PeerIP,PeerPort},
             DispatchResult = case SC#sconf.dispatch_mod of
@@ -3976,8 +3976,9 @@ send_file(CliSock, Path, all, undefined) when is_port(CliSock) ->
 	{ok, _Bytes} ->
 	    ok;
 	Err ->
-	    ?Debug("send_file(~p,~p): ~p~n", [CliSock, Path, Err])
-    end
+	    ?Debug("send_file(~p,~p): ~p~n", [CliSock, Path, Err]),
+	    Err %% Plopped here because otherwise it doesn't exist without DEBUG
+    end,
     yaws_stats:sent(Size);
 send_file(CliSock, Path, all, undefined) ->
     ?Debug("send_file(~p,~p,no ...)~n", [CliSock, Path]),
@@ -3996,13 +3997,14 @@ send_file(CliSock, Path, all, Priv) ->
     {ok, Fd} = file:open(Path, [raw, binary, read]),
     send_file(CliSock, Fd, Priv);
 send_file(CliSock, Path,  {fromto, From, To, _Tot}, _) when is_port(CliSock) ->
-    Size = yaws_sendfile:send(CliSock, Path),
+    Size = yaws_sendfile:send(CliSock, Path, From, (To-From+1)),
     case Size of
 	{ok, _Bytes} ->
 	    ok;
 	Err ->
-	    ?Debug("send_file(~p,~p): ~p~n", [CliSock, Path, Err])
-    end
+	    ?Debug("send_file(~p,~p): ~p~n", [CliSock, Path, Err]),
+	    Err %% Plopped here because otherwise it doesn't exist without DEBUG
+    end,
     yaws_stats:sent(Size);
 send_file(CliSock, Path,  {fromto, From, To, _Tot}, _) ->
     {ok, Fd} = file:open(Path, [raw, binary, read]),
