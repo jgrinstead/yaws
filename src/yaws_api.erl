@@ -8,9 +8,6 @@
 -module(yaws_api).
 -author('klacke@hyber.org').
 
-%% -compile(export_all).
-
-
 -include("../include/yaws.hrl").
 -include("../include/yaws_api.hrl").
 -include("yaws_debug.hrl").
@@ -22,6 +19,12 @@
          parse_multipart/2, parse_multipart/3]).
 -export([code_to_phrase/1, ssi/2, redirect/1]).
 -export([setcookie/2, setcookie/3, setcookie/4, setcookie/5, setcookie/6]).
+-deprecated([{setcookie, 2, eventually},
+             {setcookie, 3, eventually},
+             {setcookie, 4, eventually},
+             {setcookie, 5, eventually},
+             {setcookie, 6, eventually}]).
+-export([set_cookie/3]).
 -export([pre_ssi_files/2,  pre_ssi_string/1, pre_ssi_string/2,
          set_content_type/1,
          htmlize/1, htmlize_char/1, f/2, fl/1]).
@@ -32,7 +35,7 @@
 -export([is_absolute_URI/1]).
 -export([path_norm/1, path_norm_reverse/1,
          sanitize_file_name/1]).
--export([get_line/1, mime_type/1]).
+-export([get_line/1, mime_type/1, mime_type/2]).
 -export([stream_chunk_deliver/2, stream_chunk_deliver_blocking/2,
          stream_chunk_end/1]).
 -export([stream_process_deliver/2, stream_process_deliver_chunk/2,
@@ -42,14 +45,16 @@
 -export([new_cookie_session/1, new_cookie_session/2, new_cookie_session/3,
          cookieval_to_opaque/1, request_url/1,
          print_cookie_sessions/0,
-         replace_cookie_session/2, delete_cookie_session/1]).
+         replace_cookie_session/2, replace_cookie_session/3,
+         delete_cookie_session/1]).
 
 -export([getconf/0,
          setconf/2,
+         get_listen_port/1,
          embedded_start_conf/1, embedded_start_conf/2,
          embedded_start_conf/3, embedded_start_conf/4]).
 
--export([set_status_code/1, reformat_header/1,
+-export([set_status_code/1, reformat_header/1, reformat_header/2,
          reformat_request/1, reformat_response/1, reformat_url/1]).
 
 -export([set_trace/1,
@@ -71,22 +76,27 @@
          dir_listing/1, dir_listing/2, redirect_self/1]).
 
 -export([arg_clisock/1, arg_client_ip_port/1, arg_headers/1, arg_req/1,
-         arg_clidata/1, arg_server_path/1, arg_querydata/1, arg_appmoddata/1,
-         arg_docroot/1, arg_docroot_mount/1, arg_fullpath/1, arg_cont/1,
-         arg_state/1, arg_pid/1, arg_opaque/1, arg_appmod_prepath/1, arg_prepath/1,
+         arg_orig_req/1, arg_clidata/1, arg_server_path/1, arg_querydata/1,
+         arg_appmoddata/1, arg_docroot/1, arg_docroot_mount/1, arg_fullpath/1,
+         arg_cont/1, arg_state/1, arg_pid/1, arg_opaque/1, arg_appmod_prepath/1,
+         arg_prepath/1,
          arg_pathinfo/1]).
 -export([http_request_method/1, http_request_path/1, http_request_version/1,
-         http_response_version/1, http_response_status/1, http_response_phrase/1,
+         http_response_version/1, http_response_status/1,
+         http_response_phrase/1,
          headers_connection/1, headers_accept/1, headers_host/1,
-         headers_if_modified_since/1, headers_if_match/1, headers_if_none_match/1,
+         headers_if_modified_since/1, headers_if_match/1,
+         headers_if_none_match/1,
          headers_if_range/1, headers_if_unmodified_since/1, headers_range/1,
          headers_referer/1, headers_user_agent/1, headers_accept_ranges/1,
          headers_cookie/1, headers_keep_alive/1, headers_location/1,
          headers_content_length/1, headers_content_type/1,
          headers_content_encoding/1, headers_authorization/1,
-         headers_transfer_encoding/1, headers_x_forwarded_for/1, headers_other/1]).
+         headers_transfer_encoding/1, headers_x_forwarded_for/1,
+         headers_other/1]).
 
--export([set_header/2, set_header/3, get_header/2, get_header/3, delete_header/2]).
+-export([set_header/2, set_header/3, merge_header/2, merge_header/3,
+         get_header/2, get_header/3, delete_header/2]).
 
 -import(lists, [flatten/1, reverse/1]).
 
@@ -97,6 +107,7 @@ arg_clisock(#arg{clisock = X}) -> X.
 arg_client_ip_port(#arg{client_ip_port = X}) -> X.
 arg_headers(#arg{headers = X}) -> X.
 arg_req(#arg{req = X}) -> X.
+arg_orig_req(#arg{orig_req = X}) -> X.
 arg_clidata(#arg{clidata = X}) -> X.
 arg_server_path(#arg{server_path = X}) -> X.
 arg_querydata(#arg{querydata = X}) -> X.
@@ -146,30 +157,36 @@ headers_other(#headers{other = X}) -> X.
 
 %% parse the command line query data
 parse_query(Arg) ->
-    D = Arg#arg.querydata,
-    if
-        D == [] ->
-            [];
-        true ->
-            parse_post_data_urlencoded(D)
+    case get(query_parse) of
+        undefined ->
+            Res = case Arg#arg.querydata of
+                      [] -> [];
+                      D  -> parse_post_data_urlencoded(D)
+                  end,
+            put(query_parse, Res),
+            Res;
+        Res ->
+            Res
     end.
 
 %% parse url encoded POST data
 parse_post(Arg) ->
-    D = Arg#arg.clidata,
-    Req = Arg#arg.req,
-    case Req#http_request.method of
-        'POST' ->
-            case D of
-                [] -> [];
-                _ ->
-                    parse_post_data_urlencoded(D)
-            end;
-        Other ->
-            error_logger:error_msg(
-              "ERROR: Can't parse post body for ~p requests: URL: ~p",
-              [Other, Arg#arg.fullpath]),
-            []
+    case get(post_parse) of
+        undefined ->
+            H = Arg#arg.headers,
+            Res = case H#headers.content_type of
+                      "application/x-www-form-urlencoded"++_ ->
+                          case Arg#arg.clidata of
+                              [] -> [];
+                              D  -> parse_post_data_urlencoded(D)
+                          end;
+                      _ ->
+                          []
+                  end,
+            put(post_parse, Res),
+            Res;
+        Res ->
+            Res
     end.
 
 
@@ -234,32 +251,22 @@ parse_multipart_post(Arg) ->
     parse_multipart_post(Arg, [list]).
 parse_multipart_post(Arg, Options) ->
     H = Arg#arg.headers,
-    CT = H#headers.content_type,
-    Req = Arg#arg.req,
-    case Req#http_request.method of
-        'POST' ->
-            case CT of
+    case H#headers.content_type of
+        undefined ->
+            {error, no_content_type};
+        "multipart/form-data"++Line ->
+            case Arg#arg.cont of
+                {cont, Cont} ->
+                    parse_multipart(un_partial(Arg#arg.clidata), {cont, Cont});
                 undefined ->
-                    {error, no_content_type};
-                "multipart/form-data"++Line ->
-                    case Arg#arg.cont of
-                        {cont, Cont} ->
-                            parse_multipart(
-                              un_partial(Arg#arg.clidata),
-                              {cont, Cont});
-                        undefined ->
-                            LineArgs = parse_arg_line(Line),
-                            {value, {_, Boundary}} =
-                                lists:keysearch("boundary", 1, LineArgs),
-                            parse_multipart(
-                              un_partial(Arg#arg.clidata),
-                              Boundary, Options)
-                    end;
-                _Other ->
-                    {error, no_multipart_form_data}
+                    LineArgs = parse_arg_line(Line),
+                    {value, {_, Boundary}} = lists:keysearch("boundary", 1,
+                                                             LineArgs),
+                    parse_multipart(un_partial(Arg#arg.clidata),
+                                    Boundary, Options)
             end;
         _Other ->
-            {error, bad_method}
+            {error, no_multipart_form_data}
     end.
 
 un_partial({partial, Bin}) ->
@@ -297,6 +304,8 @@ parse_arg_key([C|Line], Key, Value) ->
 
 parse_arg_value([], Key, Value, _, _) ->
     make_parse_line_reply(Key, Value, []);
+parse_arg_value([$\\,$"], Key, Value, _, _) ->
+    make_parse_line_reply(Key, [$\\|Value], []);
 parse_arg_value([$\\,$"|Line], Key, Value, Quote, Begun) ->
     parse_arg_value(Line, Key, [$"|Value], Quote, Begun);
 parse_arg_value([$"|Line], Key, Value, false, _) ->
@@ -504,7 +513,7 @@ do_parse_spec(<<$=, Tail/binary>>, _Last, Cur, key) ->
     do_parse_spec(Tail, lists:reverse(Cur), [], value); %% change mode
 
 do_parse_spec(<<$%, $u, A:8, B:8,C:8,D:8, Tail/binary>>,
-	       Last, Cur, State) ->
+               Last, Cur, State) ->
     %% non-standard encoding for Unicode characters: %uxxxx,
     Hex = yaws:hex_to_integer([A,B,C,D]),
     do_parse_spec(Tail, Last, [ Hex | Cur],  State);
@@ -523,6 +532,7 @@ do_parse_spec(QueryList, Last, Cur, State) when is_list(QueryList) ->
 
 code_to_phrase(100) -> "Continue";
 code_to_phrase(101) -> "Switching Protocols ";
+code_to_phrase(102) -> "Processing";
 code_to_phrase(200) -> "OK";
 code_to_phrase(201) -> "Created";
 code_to_phrase(202) -> "Accepted";
@@ -530,7 +540,9 @@ code_to_phrase(203) -> "Non-Authoritative Information";
 code_to_phrase(204) -> "No Content";
 code_to_phrase(205) -> "Reset Content";
 code_to_phrase(206) -> "Partial Content";
-code_to_phrase(207) -> "Multi Status";
+code_to_phrase(207) -> "Multi-Status";
+code_to_phrase(208) -> "Already Reported";
+code_to_phrase(226) -> "IM Used";
 code_to_phrase(300) -> "Multiple Choices";
 code_to_phrase(301) -> "Moved Permanently";
 code_to_phrase(302) -> "Found";
@@ -539,6 +551,7 @@ code_to_phrase(304) -> "Not Modified";
 code_to_phrase(305) -> "Use Proxy";
 code_to_phrase(306) -> "(Unused)";
 code_to_phrase(307) -> "Temporary Redirect";
+code_to_phrase(308) -> "Permanent Redirect";
 code_to_phrase(400) -> "Bad Request";
 code_to_phrase(401) -> "Unauthorized";
 code_to_phrase(402) -> "Payment Required";
@@ -557,6 +570,13 @@ code_to_phrase(414) -> "Request-URI Too Long";
 code_to_phrase(415) -> "Unsupported Media Type";
 code_to_phrase(416) -> "Requested Range Not Satisfiable";
 code_to_phrase(417) -> "Expectation Failed";
+code_to_phrase(418) -> "I'm a teapot";
+code_to_phrase(420) -> "Enhance Your Calm";
+code_to_phrase(422) -> "Unprocessable Entity";
+code_to_phrase(423) -> "Locked";
+code_to_phrase(424) -> "Failed Dependency";
+code_to_phrase(425) -> "Unordered Collection";
+code_to_phrase(426) -> "Upgrade Required";
 code_to_phrase(428) -> "Precondition Required";
 code_to_phrase(429) -> "Too Many Requests";
 code_to_phrase(431) -> "Request Header Fields Too Large";
@@ -566,6 +586,10 @@ code_to_phrase(502) -> "Bad Gateway";
 code_to_phrase(503) -> "Service Unavailable";
 code_to_phrase(504) -> "Gateway Timeout";
 code_to_phrase(505) -> "HTTP Version Not Supported";
+code_to_phrase(506) -> "Variant Also Negotiates";
+code_to_phrase(507) -> "Insufficient Storage";
+code_to_phrase(508) -> "Loop Detected";
+code_to_phrase(510) -> "Not Extended";
 code_to_phrase(511) -> "Network Authentication Required";
 
 %% Below are some non-HTTP status codes from other protocol standards that
@@ -671,7 +695,37 @@ secs() ->
     {MS, S, _} = now(),
     (MS * 1000000) + S.
 
+cookie_option(secure) ->
+    "; Secure";
+cookie_option(http_only) ->
+    "; HttpOnly";
+cookie_option(I) ->
+    throw({badarg, I}).
+cookie_option(expires, UTC) when is_tuple(UTC) ->
+    ["; Expires=" | yaws:universal_time_as_string(UTC)];
+cookie_option(max_age, Age) when is_integer(Age) ->
+    V = if Age < 0 -> "0"; true -> integer_to_list(Age) end,
+    ["; Max-Age=" | V];
+cookie_option(path, Path) when is_list(Path), Path =/= [] ->
+    ["; Path=" | Path];
+cookie_option(domain, Domain) when is_list(Domain), Domain =/= [] ->
+    ["; Domain=" | Domain];
+cookie_option(comment, Comment) when is_list(Comment), Comment=/= [] ->
+    ["; Comment=" | Comment];
+cookie_option(I, _) ->
+    throw({badarg, I}).
 
+%% @doc Generate a set_cookie header field tuple.
+%%      This function is more RFC6265 compliant than setcookie/6 and
+%%      therefore it deprecates setcookie/6 completely.
+set_cookie(Key, Value, Options)
+        when is_list(Key), is_list(Value), is_list(Options) ->
+    %% RFC6265 (4.1.1): Name=Value options must come first.
+    {NV,SV} = lists:foldl(fun
+        ({N,V}, {L1, L2}) -> {[cookie_option(N,V) | L1], L2};
+        (N,     {L1, L2}) -> {L1, [cookie_option(N) | L2]}
+    end, {[], []}, Options),
+    {header, {set_cookie, [Key, $=, Value, "; Version=1", NV | SV]}}.
 
 setcookie(Name, Value) ->
     {header, {set_cookie, f("~s=~s;", [Name, Value])}}.
@@ -725,20 +779,41 @@ find_cookie_val2(Name, [Cookie|Rest]) ->
     end.
 
 %%
-url_decode([$%, Hi, Lo | Tail]) ->
-            Hex = yaws:hex_to_integer([Hi, Lo]),
-            [Hex | url_decode(Tail)];
-            url_decode([$?|T]) ->
-                   %% Don't decode the query string here, that is
-                   %% parsed separately.
-                   [$?|T];
-            url_decode([H|T]) when is_integer(H) ->
-                   [H |url_decode(T)];
-            url_decode([]) ->
-                   [];
-            %% deep lists
-            url_decode([H|T]) when is_list(H) ->
-                   [url_decode(H) | url_decode(T)].
+url_decode(Path) ->
+    {DecPath, QS} = url_decode(Path, []),
+    DecPath1 = case file:native_name_encoding() of
+                   latin1 ->
+                       DecPath;
+                   utf8 ->
+                       case unicode:characters_to_list(list_to_binary(DecPath)) of
+                           UTF8DecPath when is_list(UTF8DecPath) -> UTF8DecPath;
+                           _ -> DecPath
+                       end
+               end,
+    case QS of
+        [] -> lists:flatten(DecPath1);
+        _  -> lists:flatten([DecPath1, $?, QS])
+    end.
+
+url_decode([], Acc) ->
+    {lists:reverse(Acc), []};
+url_decode([$?|Tail], Acc) ->
+    %% Don't decode the query string here, that is parsed separately.
+    {lists:reverse(Acc), Tail};
+url_decode([$%, Hi, Lo | Tail], Acc) ->
+    Hex = yaws:hex_to_integer([Hi, Lo]),
+    url_decode(Tail, [Hex|Acc]);
+url_decode([H|T], Acc) when is_integer(H) ->
+    url_decode(T, [H|Acc]);
+%% deep lists
+url_decode([H|T], Acc) when is_list(H) ->
+    case url_decode(H, Acc) of
+        {P1, []} ->
+            {P2, QS} = url_decode(T, []),
+            {[P1,P2], QS};
+        {P1, QS} ->
+            {P1, QS++T}
+    end.
 
 
 path_norm(Path) ->
@@ -769,7 +844,16 @@ rest_dir (N, Path, [  _H | T ] ) -> rest_dir (N    ,        Path  , T).
 %% url decode the path and return {Path, QueryPart}
 
 url_decode_q_split(Path) ->
-    url_decode_q_split(Path, []).
+    {DecPath, QS} = url_decode_q_split(Path, []),
+    case file:native_name_encoding() of
+        latin1 ->
+            {DecPath, QS};
+        utf8 ->
+            case unicode:characters_to_list(list_to_binary(DecPath)) of
+                UTF8DecPath when is_list(UTF8DecPath) -> {UTF8DecPath, QS};
+                _ -> {DecPath, QS}
+            end
+    end.
 
 url_decode_q_split([$%, Hi, Lo | Tail], Ack) ->
     Hex = yaws:hex_to_integer([Hi, Lo]),
@@ -788,6 +872,8 @@ url_decode_q_split([], Ack) ->
 
 
 
+url_encode([H|T]) when is_list(H) ->
+    [url_encode(H) | url_encode(T)];
 url_encode([H|T]) ->
     if
         H >= $a, $z >= H ->
@@ -840,11 +926,12 @@ get_line([], _) ->
 
 
 mime_type(FileName) ->
+    mime_type(get(sc), FileName).
+
+mime_type(S, FileName) ->
     case filename:extension(FileName) of
-        [_|T] ->
-            element(2, mime_types:t(T));
-        [] ->
-            element(2, mime_types:t([]))
+        [_|T] -> element(2, mime_types:t(S, T));
+        []    -> element(2, mime_types:t(S, []))
     end.
 
 
@@ -882,10 +969,10 @@ stream_chunk_deliver_blocking(YawsPid, Data) ->
             %% not managing to close the socket (FIN_WAIT2
             %% resp. CLOSE_WAIT) the SSL process is not killed (it traps
             %% exit signals) and thus we will leak one file descriptor.
-	    error_logger:error_msg(
-	      "~p:stream_chunk_deliver_blocking/2 STREAM_GARBAGE_TIMEOUT "
-	      "(default 1 hour). Killing ~p", [?MODULE, YawsPid]),
-	    erlang:error(stream_garbage_timeout, [YawsPid, Data])
+            error_logger:error_msg(
+              "~p:stream_chunk_deliver_blocking/2 STREAM_GARBAGE_TIMEOUT "
+              "(default 1 hour). Killing ~p", [?MODULE, YawsPid]),
+            erlang:error(stream_garbage_timeout, [YawsPid, Data])
     end.
 
 stream_chunk_end(YawsPid) ->
@@ -926,7 +1013,10 @@ stream_process_end(Sock, YawsPid) ->
 
 %% Pid must the the process in control of the websocket connection.
 websocket_send(Pid, {Type, Data}) ->
-    yaws_websockets:send(Pid, {Type, Data}).
+    yaws_websockets:send(Pid, {Type, Data});
+websocket_send(Pid, #ws_frame{}=Frame) ->
+    yaws_websockets:send(Pid, Frame).
+
 
 %% returns {ok, SSL socket} if an SSL socket, undefined otherwise
 get_sslsocket({ssl, SslSocket}) ->
@@ -953,6 +1043,8 @@ print_cookie_sessions() ->
 
 replace_cookie_session(Cookie, NewOpaque) ->
     yaws_session_server:replace_session(Cookie, NewOpaque).
+replace_cookie_session(Cookie, NewOpaque, Cleanup) ->
+    yaws_session_server:replace_session(Cookie, NewOpaque, Cleanup).
 
 delete_cookie_session(Cookie) ->
     yaws_session_server:delete_session(Cookie).
@@ -993,8 +1085,16 @@ set_status_code(Code) ->
 
 %% returns [ Header1, Header2 .....]
 reformat_header(H) ->
+    FormatFun = fun(Hname, {multi, Values}) ->
+                        [lists:flatten(io_lib:format("~s: ~s", [Hname, Val])) ||
+                            Val <- Values];
+                   (Hname, Str) ->
+                        lists:flatten(io_lib:format("~s: ~s", [Hname, Str]))
+                end,
+    reformat_header(H, FormatFun).
+reformat_header(H, FormatFun) ->
     lists:zf(fun({Hname, Str}) ->
-                     I =  lists:flatten(io_lib:format("~s: ~s",[Hname, Str])),
+                     I =  FormatFun(Hname, Str),
                      {true, I};
                 (undefined) ->
                      false
@@ -1114,7 +1214,7 @@ reformat_header(H) ->
             ) ++
         lists:map(
           fun({http_header,_,K,_,V}) ->
-                  lists:flatten(io_lib:format("~s: ~s",[K,V]))
+                  FormatFun(K,V)
           end, H#headers.other).
 
 
@@ -1238,6 +1338,38 @@ set_header(#headers{}=Hdrs, Header, undefined) ->
     set_header(Hdrs, {lower, string:to_lower(Header)}, undefined);
 set_header(#headers{}=Hdrs, Header, Value) ->
     set_header(Hdrs, {lower, string:to_lower(Header)}, Value).
+
+merge_header(#headers{}=Hdrs, {Header, Value}) ->
+    merge_header(Hdrs, Header, Value).
+
+merge_header(#headers{}=Hdrs, _Header, undefined) ->
+    Hdrs;
+merge_header(#headers{}=Hdrs, Header, Value) when is_atom(Header) ->
+    merge_header(Hdrs, atom_to_list(Header), Value);
+merge_header(#headers{}=Hdrs, Header, Value) when is_binary(Header) ->
+    merge_header(Hdrs, binary_to_list(Header), Value);
+merge_header(#headers{}=Hdrs, Header, Value) when is_binary(Value) ->
+    merge_header(Hdrs, Header, binary_to_list(Value));
+merge_header(Hdrs, {lower, "set-cookie"}=LHdr, Value) ->
+    NewValue = case get_header(Hdrs, LHdr) of
+                   undefined ->
+                       {multi, [Value]};
+                   {multi, MultiVal} ->
+                       {multi, MultiVal ++ [Value]};
+                   ExistingValue ->
+                       {multi, [ExistingValue, Value]}
+               end,
+    set_header(Hdrs, LHdr, NewValue);
+merge_header(Hdrs, {lower, _Header}=LHdr, Value) ->
+    NewValue = case get_header(Hdrs, LHdr) of
+                   undefined ->
+                       Value;
+                   ExistingValue ->
+                       ExistingValue ++ ", " ++ Value
+               end,
+    set_header(Hdrs, LHdr, NewValue);
+merge_header(#headers{}=Hdrs, Header, Value) ->
+    merge_header(Hdrs, {lower, string:to_lower(Header)}, Value).
 
 get_header(#headers{}=Hdrs, connection) ->
     Hdrs#headers.connection;
@@ -1395,17 +1527,13 @@ erlang_header_name("proxy-connection")    -> 'Proxy-Connection';
 erlang_header_name(Name)                  -> capitalize_header(Name).
 
 capitalize_header(Name) ->
-   capitalize_header2(Name, "").
-
-capitalize_header2([C | Rest], "") when C >= $a andalso C =< $z ->
-   capitalize_header2(Rest, [C - $a + $A]);
-capitalize_header2([$-, C | Rest], Result) when C >= $a andalso C =< $z ->
-   capitalize_header2(Rest, [C - $a + $A, $- | Result]);
-capitalize_header2([C | Rest], Result) ->
-   capitalize_header2(Rest, [C | Result]);
-capitalize_header2([], Result) ->
-   lists:reverse(Result).
-
+    %% Before R16B Erlang capitalized words inside header names only for
+    %% headers less than 20 characters long. In R16B that length was raised
+    %% to 50. Using decode_packet lets us be portable.
+    {ok, {http_header, _, Result, _, _}, _} =
+        erlang:decode_packet(httph, list_to_binary([Name, <<": x\r\n\r\n">>]),
+                             []),
+    Result.
 
 reformat_request(#http_request{method = bad_request}) ->
     ["Bad request"];
@@ -2328,53 +2456,27 @@ skip_space(T)           -> T.
 getvar(ARG,Key) when is_atom(Key) ->
     getvar(ARG, atom_to_list(Key));
 getvar(ARG,Key) ->
-    case (ARG#arg.req)#http_request.method of
-        'POST' -> postvar(ARG, Key);
-        'GET' -> queryvar(ARG, Key);
-        _ -> undefined
-    end.
+    filter_parse(Key, yaws_api:parse_query(ARG), yaws_api:parse_post(ARG)).
 
 
 queryvar(ARG,Key) when is_atom(Key) ->
     queryvar(ARG, atom_to_list(Key));
 queryvar(ARG, Key) ->
-    Parse = case get(query_parse) of
-                undefined ->
-                    Pval = yaws_api:parse_query(ARG),
-                    put(query_parse, Pval),
-                    Pval;
-                Val0 ->
-                    Val0
-            end,
-    filter_parse(Key, Parse).
+    filter_parse(Key, yaws_api:parse_query(ARG), []).
 
 postvar(ARG, Key) when is_atom(Key) ->
     postvar(ARG, atom_to_list(Key));
 postvar(ARG, Key) ->
-    Parse = case get(post_parse) of
-                undefined ->
-                    Pval = yaws_api:parse_post(ARG),
-                    put(post_parse, Pval),
-                    Pval;
-                Val0 ->
-                    Val0
-            end,
-    filter_parse(Key, Parse).
+    filter_parse(Key, [], yaws_api:parse_post(ARG)).
 
-filter_parse(Key, Parse) ->
-    case lists:filter(fun(KV) ->
-                              (Key == element(1, KV))
-                                  andalso
-                                    (element(2, KV) /= undefined)
-                      end,
-                      Parse) of
+filter_parse(Key, QueryParse, PostParse) ->
+    Fun = fun({K,V}) -> (Key == K andalso V /= undefined) end,
+    Values = lists:filter(Fun, QueryParse) ++ lists:filter(Fun, PostParse),
+    case Values of
         [] -> undefined;
         [{_, V}] -> {ok,V};
         %% Multivalued case - return list of values
-        Vs -> list_to_tuple(lists:map(fun(KV) ->
-                                              element(2, KV)
-                                      end,
-                                      Vs))
+        _  -> list_to_tuple(lists:map(fun({_,V}) -> V end, Values))
     end.
 
 
@@ -2447,18 +2549,17 @@ sanitize_file_name([]) ->
 setconf(GC0, Groups0) ->
     setconf(GC0, Groups0, true).
 setconf(GC0, Groups0, CheckCertsChanged) ->
-    CertsChanged = if CheckCertsChanged == true ->
-                           lists:member(yes,gen_server:call(
-                                              yaws_server,
-                                              check_certs, infinity));
-                      true ->
-                           false
-                   end,
-    if
-        CertsChanged ->
-            application:stop(ssl),
-            application:start(ssl);
+    case CheckCertsChanged of
         true ->
+            CertCheck = gen_server:call(yaws_server, check_certs, infinity),
+            case lists:member(yes, CertCheck) of
+                true ->
+                    application:stop(ssl),
+                    application:start(ssl);
+                false ->
+                    ok
+            end;
+        false ->
             ok
     end,
 
@@ -2475,13 +2576,15 @@ setconf(GC0, Groups0, CheckCertsChanged) ->
             {error, need_restart}
     end.
 
-
-
-
 %% return {ok, GC, Groups}.
 getconf() ->
     gen_server:call(yaws_server, getconf, infinity).
 
+%% return listen port number for the given sconf, useful if yaws is used in
+%% a test scenario where the configured port number is 0 (for requesting an
+%% ephemeral port)
+get_listen_port(SC) ->
+    yaws_server:listen_port(SC).
 
 embedded_start_conf(DocRoot) when is_list(DocRoot) ->
     embedded_start_conf(DocRoot, []).

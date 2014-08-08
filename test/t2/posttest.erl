@@ -1,15 +1,16 @@
 -module(posttest).
 -export([out/1]).
 
--include("../../include/yaws.hrl").
--include("../../include/yaws_api.hrl").
+-include("yaws.hrl").
+-include("yaws_api.hrl").
 
 out(Arg) ->
     Url = yaws_api:request_url(Arg),
     case Url#url.path of
         "/posttest/chunked/" ++ ExpectedSize ->
+            TE = yaws:to_lower((Arg#arg.headers)#headers.transfer_encoding),
             if
-                (Arg#arg.headers)#headers.transfer_encoding =:= "chunked" ->
+                TE =:= "chunked" ->
                     handle_post(list_to_integer(ExpectedSize), Arg);
                 true ->
                     Reason = io_lib:format("Expected a chunked transfer-encoding request\n~p",
@@ -22,6 +23,7 @@ out(Arg) ->
             Reason = "unknown path: " ++ Url#url.path,
             handle_post(0, Arg#arg{state={flush,500,Reason}})
     end.
+
 
 
 handle_post(_, #arg{clidata=Data, state={flush, HttpCode, Reason}}) ->

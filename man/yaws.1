@@ -1,4 +1,4 @@
-.TH YAWS "1" "" "" "User Commands"
+.TH YAWS "1" "" "" "User Commands" -*- nroff -*-
 .SH NAME
 yaws \- yet another webserver
 .SH SYNOPSIS
@@ -132,7 +132,7 @@ server will write all internal files into the directory
 $HOME/.yaws/yaws/ID.
 
 Yaws also creates a file called
-${VARDIR}/run/yaws/ctl-${ID} which contains the portnumber the daemon
+$HOME/.yaws/yaws/ID/CTL which contains the portnumber the daemon
 is listening on for control request by the control command such
 as "yaws --hup" etc.
 
@@ -243,4 +243,3 @@ Written by Claes Wikstrom
 .SH "SEE ALSO"
 .BR yaws.conf (5)
 .BR erl (1)
-
