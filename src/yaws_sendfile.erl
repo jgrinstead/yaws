@@ -16,14 +16,6 @@
 %% supported)
 -export([bytes_to_transfer/3]).
 
--ifdef(HAVE_YAWS_SENDFILE).
--define(HAVE_SENDFILE, 1).
--endif.
-
--ifdef(HAVE_YAWS_SENDFILE).
--define(HAVE_SENDFILE, 1).
--endif.
-
 -ifdef(HAVE_SENDFILE).
 
 -behavior(gen_server).
