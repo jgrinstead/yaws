@@ -262,6 +262,9 @@ handle_cast(_Msg, State) ->
 handle_info({tcp, Socket, FirstPacket},
             #state{wsstate=#ws_state{sock=Socket}}=State) ->
     handle_frames(FirstPacket, State);
+handle_info({tcp, Socket, FirstPacket}, State) ->
+    error_logger:error_msg("Socket Mismatch! ~p =/= ~p~n", [Socket, (State#state.wsstate)#ws_state.sock]),
+    {noreply, State};
 handle_info({ssl, Socket, FirstPacket},
             #state{wsstate=#ws_state{sock={ssl, Socket}}}=State) ->
     handle_frames(FirstPacket, State);
@@ -306,7 +309,7 @@ handle_info(timeout, #state{wait_pong_frame=true}=State) ->
     State1 = State#state{wait_pong_frame=false},
     case get_opts(drop_on_timeout, State1#state.opts) of
         true  -> handle_abnormal_closure(State1);
-        false -> handle_callback(info, [timeout, State1])
+        false -> handle_callback(info, [State1, timeout])
     end;
 
 %% Close timeout: just shutdown the gen_server
