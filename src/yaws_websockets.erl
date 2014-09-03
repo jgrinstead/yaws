@@ -106,10 +106,10 @@ start(Arg, CallbackMod, Opts) ->
     CliSock = Arg#arg.clisock,
     Res = case yaws_api:get_sslsocket(CliSock) of
               {ok, SslSocket} ->
-                  ssl:setopts(SslSocket, [{packet, raw}, {active, once}]),
+                  ssl:setopts(SslSocket, [{packet, raw}, {active, false}]),
                   ssl:controlling_process(SslSocket, OwnerPid);
               undefined ->
-                  inet:setopts(CliSock, [{packet, raw}, {active, once}]),
+                  inet:setopts(CliSock, [{packet, raw}, {active, false}]),
                   gen_tcp:controlling_process(CliSock, OwnerPid)
           end,
     case Res of
@@ -217,6 +217,7 @@ handle_cast(ok, #state{arg=Arg, cbinfo=CbInfo}=State) ->
                                  vsn       = WSVersion,
                                  frag_type = none},
             handshake(CliSock, WSKey, Protocol),
+            websocket_setopts(WSState, [{active, once}]),
 
             case CbInfo#cbinfo.open_fun of
                 undefined ->
@@ -262,9 +263,6 @@ handle_cast(_Msg, State) ->
 handle_info({tcp, Socket, FirstPacket},
             #state{wsstate=#ws_state{sock=Socket}}=State) ->
     handle_frames(FirstPacket, State);
-handle_info({tcp, Socket, _FirstPacket}, State) ->
-    error_logger:error_msg("Socket Mismatch! ~p =/= ~p~n", [Socket, (State#state.wsstate)#ws_state.sock]),
-    {noreply, State};
 handle_info({ssl, Socket, FirstPacket},
             #state{wsstate=#ws_state{sock={ssl, Socket}}}=State) ->
     handle_frames(FirstPacket, State);
