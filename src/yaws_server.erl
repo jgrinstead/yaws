@@ -2867,6 +2867,8 @@ deliver_dyn_part(CliSock,                       % essential params
             Priv = deliver_accumulated(Arg, CliSock, undefined, stream),
             wait_for_streamcontent_pid(Priv, CliSock, Pid);
         {websocket, CallbackMod, Opts} ->
+            {IP,_} = Arg#arg.client_ip_port,
+            maybe_access_log(IP, Arg#arg.req, Arg#arg.headers),
             %% The handshake passes control over the socket to OwnerPid
             %% and terminates the Yaws worker!
             yaws_websockets:start(Arg, CallbackMod, Opts);
