@@ -267,6 +267,13 @@ handle_info({ssl, Socket, FirstPacket},
             #state{wsstate=#ws_state{sock={ssl, Socket}}}=State) ->
     handle_frames(FirstPacket, State);
 
+handle_info({ssl_error, _Socket, Error}, State) ->
+    Info = io_lib:format("ssl_error ~p", [Error]),
+    handle_abnormal_closure(State, iolist_to_binary(Info));
+handle_info({tcp_error, _Socket, Error}, State) ->
+    Info = io_lib:format("tcp_error ~p", [Error]),
+    handle_abnormal_closure(State, iolist_to_binary(Info));
+
 %% Abnormal socket closure: only if no Close frame was received or sent.
 handle_info({tcp_closed, Socket},
             #state{wsstate=#ws_state{sock=Socket}}=State) ->
@@ -275,7 +282,7 @@ handle_info({tcp_closed, Socket},
         State#state.close_timer /= undefined ->
             {stop, normal, State};
         true ->
-            handle_abnormal_closure(State)
+            handle_abnormal_closure(State, <<"tcp_closed">>)
     end;
 handle_info({ssl_closed, Socket},
             #state{wsstate=#ws_state{sock={ssl, Socket}}}=State) ->
@@ -284,7 +291,7 @@ handle_info({ssl_closed, Socket},
         State#state.close_timer /= undefined ->
             {stop, normal, State};
         true ->
-            handle_abnormal_closure(State)
+            handle_abnormal_closure(State, <<"ssl_closed">>)
     end;
 
 
@@ -306,7 +313,7 @@ handle_info(timeout, #state{wait_pong_frame=true}=State) ->
     % error_logger:error_msg("endpoint gone away !", []),
     State1 = State#state{wait_pong_frame=false},
     case get_opts(drop_on_timeout, State1#state.opts) of
-        true  -> handle_abnormal_closure(State1);
+        true  -> handle_abnormal_closure(State1, <<"timeout">>);
         false -> handle_callback(info, [State1, timeout])
     end;
 
@@ -556,19 +563,19 @@ handle_callback(Type, [#state{cbinfo=CbInfo}=State | Args]) ->
             end
     end.
 
-handle_abnormal_closure(#state{wsstate=WSState}=State) ->
+handle_abnormal_closure(#state{wsstate=WSState}=State, Info) ->
     %% The only way we should get here is due to an abnormal close. Section
     %% 7.1.5 of RFC 6455 specifies 1006 as the connection close code for
     %% abnormal closure. It's also described in section 7.4.1.
     CloseStatus    = ?WS_STATUS_ABNORMAL_CLOSURE,
-    ClosePayload   = <<CloseStatus:16/big>>,
+    ClosePayload   = <<CloseStatus:16/big, Info/binary>>,
     CloseWSState   = WSState#ws_state{sock=undefined,frag_type=none},
     CloseFrameInfo = #ws_frame_info{fin         = 1,
                                     rsv         = 0,
                                     opcode      = close,
                                     masked      = 0,
                                     masking_key = <<>>,
-                                    length      = 2,
+                                    length      = byte_size(ClosePayload),
                                     payload     = ClosePayload,
                                     data        = ClosePayload,
                                     ws_state    = CloseWSState},
