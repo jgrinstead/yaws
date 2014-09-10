@@ -1188,8 +1188,8 @@ aloop(CliSock, {IP,Port}=IPPort, GS, Num) ->
 					error_logger:format("Headers = ~s~n", [?format_record(H, headers)]),
 					error_logger:format("Request = ~s~n", [?format_record(Req, http_request)]),
 					exit(normal);
-				    {true, ProxyIP} ->
-					ProxyIP;
+				    {true, ProxyIPPort} ->
+					ProxyIPPort;
 				    {false, undefined} ->
 					IPPort;
 				    _ ->
