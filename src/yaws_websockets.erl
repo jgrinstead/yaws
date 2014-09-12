@@ -1081,9 +1081,10 @@ unframe_one(WSState, FirstPacket, Opts) ->
             end;
         {tcp_error, Reason} ->
             %% FIXME: close the connection ?
-            error_logger:error_msg("Abnormal Closure: ~p", [Reason]),
+            % error_logger:error_msg("Abnormal Closure: ~p", [Reason]),
             CloseStatus    = ?WS_STATUS_ABNORMAL_CLOSURE,
-            ClosePayload   = <<CloseStatus:16/big>>,
+            CloseReason    = iolist_to_binary(io_lib:format("~p", [Reason])),
+            ClosePayload   = <<CloseStatus:16/big, CloseReason/binary>>,
             CloseWSState   = WSState#ws_state{sock=undefined,frag_type=none},
             {#ws_frame_info{fin         = 1,
                             rsv         = 0,
