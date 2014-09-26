@@ -29,6 +29,7 @@
 -record(state, {arg,
                 opts,
                 wsstate,
+                unused_stream = <<>>,
                 cbinfo,
                 cbstate,
                 cbtype,
@@ -217,7 +218,7 @@ handle_cast(ok, #state{arg=Arg, cbinfo=CbInfo}=State) ->
                                  vsn       = WSVersion,
                                  frag_type = none},
             handshake(CliSock, WSKey, Protocol),
-            websocket_setopts(WSState, [{active, once}]),
+            websocket_setopts(WSState, [{active, true}]),
 
             case CbInfo#cbinfo.open_fun of
                 undefined ->
@@ -521,17 +522,21 @@ deliver_xxx(CliSock, Code, Hdrs) ->
 
 
 %% ----
-handle_frames(FirstPacket, #state{wsstate=WSState, opts=Opts}=State) ->
-    FrameInfos = unframe_active_once(WSState, FirstPacket, Opts),
+handle_frames(FirstPacket, #state{wsstate=WSState,
+                                  opts=Opts,
+                                  unused_stream=Unused}=State) ->
+    FrameInfos = case Unused of
+        <<>> -> unframe(WSState, FirstPacket, Opts);
+        _    -> unframe(WSState, <<Unused/binary, FirstPacket/binary>>, Opts)
+    end,
     Result = case State#state.cbtype of
                  basic    -> basic_messages(FrameInfos, State);
                  advanced -> advanced_messages(FrameInfos, State)
              end,
     case Result of
         {ok, State1, Timeout} ->
-            Last = lists:last(FrameInfos),
-            {noreply, State1#state{wsstate=Last#ws_frame_info.ws_state,
-                                  wait_pong_frame=false},
+            LastWsState = last_ws_state(FrameInfos, State1#state.wsstate),
+            {noreply, State1#state{wsstate=LastWsState, wait_pong_frame=false},
              Timeout};
         {stop, State1} ->
             case State1#state.close_frame_received of
@@ -544,6 +549,12 @@ handle_frames(FirstPacket, #state{wsstate=WSState, opts=Opts}=State) ->
             end
     end.
 
+last_ws_state([#ws_frame_info{ws_state=State}|Rest], _LastState) ->
+    last_ws_state(Rest, State);
+last_ws_state([], LastState) ->
+    LastState;
+last_ws_state([{frame_incomplete, _}], LastState) ->
+    LastState.
 
 handle_callback(Type, [#state{cbinfo=CbInfo}=State | Args]) ->
     Cb = case Type of
@@ -598,7 +609,11 @@ basic_messages(FrameInfos, State) ->
     basic_messages(FrameInfos, State, State#state.timeout).
 
 basic_messages([], State, Tout) ->
-    {ok, State, Tout};
+    {ok, State#state{unused_stream = <<>>}, Tout};
+basic_messages([{frame_incomplete, Unused}], State, Tout) ->
+    %% Unused is a part of a potentially large (some kb) binary,
+    %% so we copy it to detach it for gc purposes
+    {ok, State#state{unused_stream = binary:copy(Unused, 1)}, Tout};
 basic_messages([FrameInfo|Rest],
                #state{cbinfo=CbInfo, cbstate={FrameState,CbState}}=State,
                Tout) ->
@@ -792,7 +807,11 @@ advanced_messages(FrameInfos, State) ->
     advanced_messages(FrameInfos, State, State#state.timeout).
 
 advanced_messages([], State, Tout) ->
-    {ok, State, Tout};
+    {ok, State#state{unused_stream= <<>>}, Tout};
+advanced_messages([{frame_incomplete, Unused}], State, Tout) ->
+    %% Unused is a part of a potentially large (some kb) binary,
+    %% so we copy it to detach it for gc purposes
+    {ok, State#state{unused_stream=binary:copy(Unused,1)}, Tout};
 advanced_messages([FrameInfo|Rest], #state{close_timer=TRef}=State,
                   Tout) when TRef /= undefined ->
     case FrameInfo of
@@ -919,32 +938,6 @@ ws_version(Headers) ->
         V    -> {unsupported_version, V}
     end.
 
-buffer(Socket, Len, Buffered) ->
-    case Buffered of
-        <<_Expected:Len/binary>> -> % exactly enough
-            Buffered;
-        <<_Expected:Len/binary,_Extra/binary>> -> % more than expected
-            Buffered;
-        _ ->
-            %% not enough
-            More = do_recv(Socket, Len - byte_size(Buffered), []),
-            <<Buffered/binary, More/binary>>
-    end.
-
-do_recv(_, 0, Acc) ->
-    list_to_binary(lists:reverse(Acc));
-do_recv(Socket, Sz, Acc) ->
-    %% TODO: add configurable timeout to receive data
-    Res = case yaws_api:get_sslsocket(Socket) of
-              {ok, SslSocket} -> ssl:recv(SslSocket, Sz,  5000);
-              undefined       -> gen_tcp:recv(Socket, Sz, 5000)
-          end,
-    case Res of
-        {ok, Bin}       -> do_recv(Socket, Sz - byte_size(Bin), [Bin|Acc]);
-        {error, Reason} -> throw({tcp_error, Reason})
-    end.
-
-
 checks(Unframed) ->
     check_reserved_bits(Unframed).
 
@@ -976,12 +969,11 @@ check_reserved_opcode(_) ->
     ok.
 
 
-ws_frame_info(#ws_state{sock=Socket},
-              <<Fin:1, Rsv:3, Opcode:4, Masked:1, Len1:7, Rest/binary>>,
+ws_frame_info(<<Fin:1, Rsv:3, Opcode:4, Masked:1, Len1:7, Rest/binary>>,
               Opts) ->
     case check_control_frame(Len1, Opcode, Fin) of
         ok ->
-            case ws_frame_info_secondary(Socket, Masked, Len1, Rest, Opts) of
+            case ws_frame_info_secondary(Masked, Len1, Rest, Opts) of
                 {ws_frame_info_secondary,Length,MaskingKey,Payload,Excess} ->
                     FrameInfo = #ws_frame_info{fin=Fin,
                                                rsv=Rsv,
@@ -997,50 +989,54 @@ ws_frame_info(#ws_state{sock=Socket},
         Other ->
             Other
     end;
+ws_frame_info(_Packet, _Opts) ->
+    frame_incomplete.
 
-ws_frame_info(WSState = #ws_state{sock=Socket}, FirstPacket, Opts) ->
-    ws_frame_info(WSState, buffer(Socket, 2, FirstPacket), Opts).
 
-
-ws_frame_info_secondary(Socket, Masked, Len1, Rest, Opts) ->
+ws_frame_info_secondary(Masked, Len1, Rest, Opts) ->
     MaxLen = get_opts(max_frame_size, Opts),
     CloseIfUnmasked = get_opts(close_if_unmasked, Opts),
     MaskLength = case Masked of
                      0 -> 0;
                      1 -> 4
                  end,
-    case Len1 of
-        126 ->
-            <<Len:16, MaskingKey:MaskLength/binary, Rest2/binary>> =
-                buffer(Socket, MaskLength + 2 , Rest);
-        127 ->
-            <<Len:64, MaskingKey:MaskLength/binary, Rest2/binary>> =
-                buffer(Socket, MaskLength + 8 , Rest);
-        Len ->
-            <<MaskingKey:MaskLength/binary, Rest2/binary>> =
-                buffer(Socket, MaskLength, Rest)
+    FirstCase = case {Len1, Rest} of
+        {126, <<Len:16, MaskingKey:MaskLength/binary,
+                Payload:Len/binary, Excess/binary>>} ->
+            {Len, MaskingKey, Payload, Excess};
+        {127, <<Len:64, MaskingKey:MaskLength/binary,
+                Payload:Len/binary, Excess/binary>>} ->
+            {Len, MaskingKey, Payload, Excess};
+        {Len, <<MaskingKey:MaskLength/binary,
+                Payload:Len1/binary, Excess/binary>>} when Len < 126 ->
+            {Len, MaskingKey, Payload, Excess};
+        {126, <<Len:16, _/binary>>} ->
+            {Len, frame_incomplete};
+        {127, <<Len:64, _/binary>>} ->
+            {Len, frame_incomplete};
+        Len when Len < 126 ->
+            {Len, frame_incomplete};
+        _ ->
+            {unknown, frame_incomplete}
     end,
-    if
-        CloseIfUnmasked == true andalso MaskingKey == <<>> ->
+    case FirstCase of
+        {unknown, frame_incomplete} ->
+            frame_incomplete;
+        {Len0, _} when Len0 > MaxLen ->
+            error_logger:error_msg(
+                "Payload length ~p longer than max allowed of ~p",
+                [Len0, MaxLen]
+            ),
+            {fail_connection, ?WS_STATUS_MSG_TOO_BIG, <<"Frame too big">>};
+        {_, frame_incomplete} ->
+            frame_incomplete;
+        {_Len, <<>>, _Payload, _Excess} when CloseIfUnmasked == true ->
             error_logger:error_msg("Unmasked frame forbidden", []),
             {fail_connection, ?WS_STATUS_PROTO_ERROR,
              <<"Unmasked frame forbidden">>};
-        Len > MaxLen ->
-            error_logger:error_msg(
-              "Payload length ~p longer than max allowed of ~p",
-              [Len, MaxLen]
-             ),
-            {fail_connection, ?WS_STATUS_MSG_TOO_BIG, <<"Frame too big">>};
-        true ->
-            <<Payload:Len/binary, Excess/binary>> = buffer(Socket, Len, Rest2),
-            {ws_frame_info_secondary, Len, MaskingKey, Payload, Excess}
+        {Len0, MaskingKey0, Payload0, Excess0} ->
+            {ws_frame_info_secondary, Len0, MaskingKey0, Payload0, Excess0}
     end.
-
-unframe_active_once(WSState, FirstPacket, Opts) ->
-    Frames = unframe(WSState, FirstPacket, Opts),
-    websocket_setopts(WSState, [{active, once}]),
-    Frames.
-
 
 %% Returns all the WebSocket frames fully or partially contained in FirstPacket,
 %% reading exactly as many more bytes from Socket as are needed to finish
@@ -1058,13 +1054,15 @@ unframe(WSState, FirstPacket, Opts) ->
             %% Every new recursion uses the #ws_state from the calling
             %% recursion.
             [FrameInfo | unframe(NewWSState, RestBin, Opts)];
+        frame_incomplete ->
+            [{frame_incomplete, FirstPacket}];
         Fail ->
             [Fail]
     end.
 
 %% -> {#ws_frame_info, RestBin} | {fail_connection, Reason}
 unframe_one(WSState, FirstPacket, Opts) ->
-    case catch ws_frame_info(WSState, FirstPacket, Opts) of
+    case catch ws_frame_info(FirstPacket, Opts) of
         {FrameInfo = #ws_frame_info{}, RestBin} ->
             Unmasked = mask(FrameInfo#ws_frame_info.masking_key,
                             FrameInfo#ws_frame_info.payload),
@@ -1079,6 +1077,8 @@ unframe_one(WSState, FirstPacket, Opts) ->
                 Else ->
                     Else
             end;
+        frame_incomplete ->
+            frame_incomplete;
         {tcp_error, Reason} ->
             %% FIXME: close the connection ?
             % error_logger:error_msg("Abnormal Closure: ~p", [Reason]),
