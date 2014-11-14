@@ -525,17 +525,22 @@ deliver_xxx(CliSock, Code, Hdrs) ->
 handle_frames(FirstPacket, #state{wsstate=WSState,
                                   opts=Opts,
                                   unused_stream=Unused}=State) ->
-    FrameInfos = case Unused of
-        <<>> -> unframe(WSState, FirstPacket, Opts);
-        _    -> unframe(WSState, <<Unused/binary, FirstPacket/binary>>, Opts)
+    Stream = case Unused of
+        <<>> -> FirstPacket;
+        _    -> <<Unused/binary, FirstPacket/binary>>
     end,
+    {FrameInfos, Remainder} = unframe(WSState, Stream, Opts),
+    State0 = State#state{unused_stream = Remainder},
     Result = case State#state.cbtype of
-                 basic    -> basic_messages(FrameInfos, State);
-                 advanced -> advanced_messages(FrameInfos, State)
+                 basic    -> basic_messages(FrameInfos, State0);
+                 advanced -> advanced_messages(FrameInfos, State0)
              end,
     case Result of
         {ok, State1, Timeout} ->
-            LastWsState = last_ws_state(FrameInfos, State1#state.wsstate),
+            LastWsState = case FrameInfos of
+                [] -> WSState;
+                _  -> (lists:last(FrameInfos))#ws_frame_info.ws_state
+            end,
             {noreply, State1#state{wsstate=LastWsState, wait_pong_frame=false},
              Timeout};
         {stop, State1} ->
@@ -549,12 +554,6 @@ handle_frames(FirstPacket, #state{wsstate=WSState,
             end
     end.
 
-last_ws_state([#ws_frame_info{ws_state=State}|Rest], _LastState) ->
-    last_ws_state(Rest, State);
-last_ws_state([], LastState) ->
-    LastState;
-last_ws_state([{frame_incomplete, _}], LastState) ->
-    LastState.
 
 handle_callback(Type, [#state{cbinfo=CbInfo}=State | Args]) ->
     Cb = case Type of
@@ -609,11 +608,7 @@ basic_messages(FrameInfos, State) ->
     basic_messages(FrameInfos, State, State#state.timeout).
 
 basic_messages([], State, Tout) ->
-    {ok, State#state{unused_stream = <<>>}, Tout};
-basic_messages([{frame_incomplete, Unused}], State, Tout) ->
-    %% Unused is a part of a potentially large (some kb) binary,
-    %% so we copy it to detach it for gc purposes
-    {ok, State#state{unused_stream = binary:copy(Unused, 1)}, Tout};
+    {ok, State, Tout};
 basic_messages([FrameInfo|Rest],
                #state{cbinfo=CbInfo, cbstate={FrameState,CbState}}=State,
                Tout) ->
@@ -807,11 +802,7 @@ advanced_messages(FrameInfos, State) ->
     advanced_messages(FrameInfos, State, State#state.timeout).
 
 advanced_messages([], State, Tout) ->
-    {ok, State#state{unused_stream= <<>>}, Tout};
-advanced_messages([{frame_incomplete, Unused}], State, Tout) ->
-    %% Unused is a part of a potentially large (some kb) binary,
-    %% so we copy it to detach it for gc purposes
-    {ok, State#state{unused_stream=binary:copy(Unused,1)}, Tout};
+    {ok, State, Tout};
 advanced_messages([FrameInfo|Rest], #state{close_timer=TRef}=State,
                   Tout) when TRef /= undefined ->
     case FrameInfo of
@@ -1046,18 +1037,21 @@ ws_frame_info_secondary(Masked, Len1, Rest, Opts) ->
 %% your socket receive buffer.
 %%
 %% -> { #ws_state, [#ws_frame_info,...,#ws_frame_info] }
-unframe(_WSState, <<>>, _Opts) ->
-    [];
 unframe(WSState, FirstPacket, Opts) ->
+    unframe(WSState, FirstPacket, Opts, []).
+
+unframe(_WSState, <<>>, _Opts, Acc) ->
+    {lists:reverse(Acc), <<>>};
+unframe(WSState, FirstPacket, Opts, Acc) ->
     case unframe_one(WSState, FirstPacket, Opts) of
         {FrameInfo = #ws_frame_info{ws_state = NewWSState}, RestBin} ->
             %% Every new recursion uses the #ws_state from the calling
             %% recursion.
-            [FrameInfo | unframe(NewWSState, RestBin, Opts)];
+            unframe(NewWSState, RestBin, Opts, [FrameInfo | Acc]);
         frame_incomplete ->
-            [{frame_incomplete, FirstPacket}];
+            {lists:reverse(Acc), FirstPacket};
         Fail ->
-            [Fail]
+            {lists:reverse([Fail | Acc]), <<>>}
     end.
 
 %% -> {#ws_frame_info, RestBin} | {fail_connection, Reason}
