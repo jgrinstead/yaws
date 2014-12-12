@@ -1926,7 +1926,6 @@ fload(FD, ssl, GC, C, Lno, Chars) ->
         ["protocol_version", '=' | Vsns0] ->
             try
                 Vsns = [list_to_existing_atom(V) || V <- Vsns0, not is_atom(V)],
-                ok = application:set_env(ssl, protocol_version, Vsns),
                 C1 = C#sconf{
                        ssl=(C#sconf.ssl)#ssl{protocol_version=Vsns}
                       },
