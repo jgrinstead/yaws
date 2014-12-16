@@ -566,7 +566,7 @@ handle_callback(Type, [#state{cbinfo=CbInfo}=State | Args]) ->
         CbFun ->
             {_, CbState} = State#state.cbstate,
             CbMod = CbInfo#cbinfo.module,
-            Res   = erlang:apply(CbMod, CbFun, Args ++ [CbState]),
+            Res   = (catch erlang:apply(CbMod, CbFun, Args ++ [CbState])),
             case handle_callback_result(Res, State) of
                 {ok, State1, Timeout} -> {noreply, State1, Timeout};
                 {stop, State1}        -> {stop, normal, State1}
