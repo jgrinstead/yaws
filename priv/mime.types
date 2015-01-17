@@ -73,6 +73,7 @@ application/fastsoap
 application/fits
 application/font-tdpfr				pfr
 application/font-woff				woff
+application/font-woff2				woff2
 application/gml+xml				gml
 application/gpx+xml				gpx
 application/gxf					gxf
