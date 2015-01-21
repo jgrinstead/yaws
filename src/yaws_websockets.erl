@@ -440,7 +440,11 @@ get_opts(Key, Opts) ->
 
 check_origin(_Origin, any)       -> ok;
 check_origin(Actual,  Actual )   -> ok;
-check_origin(_Actual, _Expected) -> error.
+check_origin(Origin,  Allowed)   ->
+    case {lists:reverse(Origin), lists:reverse(Allowed)} of
+        {"." ++ RevAllowed, RevAllowed} -> ok;
+        _                               -> error
+    end.
 
 check_connection(undefined) ->
     error;
