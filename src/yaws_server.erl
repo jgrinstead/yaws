@@ -2277,6 +2277,7 @@ handle_ut(CliSock, ARG, UT = #urltype{type = regular}, _N) ->
                                 false ->
                                     yaws:outh_set_static_headers
                                       (Req, UT, H, Range),
+                                    maybe_set_page_options(),
                                     Do_deliver()
                             end
                     end
