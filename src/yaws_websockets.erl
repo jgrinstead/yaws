@@ -66,7 +66,12 @@ start(Arg, CallbackMod, Opts) ->
         ok ->
             ok;
         error ->
-            error_logger:error_msg("Invalid connection header", []),
+            case erlang:function_exported(CallbackMod, handle_bad_header, 2) of
+                true ->
+                    CallbackMod:handle_bad_header(connection, Arg);
+                false ->
+                    error_logger:error_msg("Invalid connection header", [])
+            end,
             deliver_xxx(Arg#arg.clisock, 400),
             exit(normal)
     end,
@@ -75,7 +80,12 @@ start(Arg, CallbackMod, Opts) ->
         ok ->
             ok;
         error ->
-            error_logger:error_msg("Invalid upgrade header", []),
+            case erlang:function_exported(CallbackMod, handle_bad_header, 2) of
+                true ->
+                    CallbackMod:handle_bad_header(upgrade, Arg);
+                false ->
+                    error_logger:error_msg("Invalid upgrade header", [])
+            end,
             deliver_xxx(Arg#arg.clisock, 400),
             exit(normal)
     end,
@@ -85,8 +95,13 @@ start(Arg, CallbackMod, Opts) ->
         ok ->
             ok;
         error ->
-            error_logger:error_msg("Expected origin ~p but found ~p",
-                                   [OriginOpt, Origin]),
+            case erlang:function_exported(CallbackMod, handle_bad_header, 2) of
+                true ->
+                    CallbackMod:handle_bad_header(origin, Arg);
+                false ->
+                    error_logger:error_msg("Expected origin ~p but found ~p",
+                                            [OriginOpt, Origin])
+            end,
             deliver_xxx(Arg#arg.clisock, 403),
             exit(normal)
     end,
