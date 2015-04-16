@@ -1489,8 +1489,8 @@ fload(FD, server, GC, C, Lno, Chars) ->
             fload(FD, server, GC, C1, Lno+1, ?NEXTLINE);
 
         ["errormod_conn", '=' , Module] ->
-            C2 = C#sconf{errormod_conn = list_to_atom(Module)},
-            fload(FD, server, GC, C2, Cs, Lno+1, Next);
+            C1 = C#sconf{errormod_conn = list_to_atom(Module)},
+            fload(FD, server, GC, C1, Lno+1, ?NEXTLINE);
 
         ["arg_rewrite_mod", '=', Module] ->
             C1 = C#sconf{arg_rewrite_mod = list_to_atom(Module)},
@@ -1630,10 +1630,10 @@ fload(FD, server, GC, C, Lno, Chars) ->
             fload(FD, server, GC, C1, Lno+1, ?NEXTLINE);
 
         ["expect_proxy_header",'=',Bool] ->
-	    case is_bool(Bool) of
+            case is_bool(Bool) of
                 {true, Val} ->
-                    C2 = ?sc_set_expect_proxy_header(C, Val),
-                    fload(FD, server, GC, C2, Cs, Lno+1, Next);
+                    C1 = ?sc_set_expect_proxy_header(C, Val),
+                    fload(FD, server, GC, C1, Lno+1, ?NEXTLINE);
                 false ->
                     {error, ?F("Expect true|false at line ~w", [Lno])}
             end;
