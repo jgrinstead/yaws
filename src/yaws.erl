@@ -2287,6 +2287,12 @@ do_http_get_headers(CliSock, SSL) ->
 http_recv_request(CliSock, SSL) ->
     setopts(CliSock, [{packet, http}, {packet_size, 16#4000}], SSL),
     case do_recv(CliSock, 0,  SSL) of
+        {ok, #http_request{path={abs_path, [$/|_]}} = R} ->
+            R;
+        {ok, #http_request{path={abs_path, RelPath}} = R} ->
+            %% There's a bug in OTP where a single, non-"/" codepoint will be
+            %% labeled as an absolute path.
+            R#http_request{path=RelPath};
         {ok, R} when is_record(R, http_request) ->
             R;
         {ok, R} when is_record(R, http_response) ->
