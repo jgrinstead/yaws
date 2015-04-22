@@ -29,6 +29,7 @@
 -record(state, {arg,
                 opts,
                 wsstate,
+                unused_stream = <<>>,
                 cbinfo,
                 cbstate,
                 cbtype,
@@ -44,7 +45,8 @@
                  open_fun,
                  msg_fun_1,
                  msg_fun_2,
-                 info_fun}).
+                 info_fun,
+		 call_fun}).
 
 -export([start/3, send/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -64,7 +66,12 @@ start(Arg, CallbackMod, Opts) ->
         ok ->
             ok;
         error ->
-            error_logger:error_msg("Invalid connection header", []),
+            case erlang:function_exported(CallbackMod, handle_bad_header, 2) of
+                true ->
+                    CallbackMod:handle_bad_header(connection, Arg);
+                false ->
+                    error_logger:error_msg("Invalid connection header", [])
+            end,
             deliver_xxx(Arg#arg.clisock, 400),
             exit(normal)
     end,
@@ -73,7 +80,12 @@ start(Arg, CallbackMod, Opts) ->
         ok ->
             ok;
         error ->
-            error_logger:error_msg("Invalid upgrade header", []),
+            case erlang:function_exported(CallbackMod, handle_bad_header, 2) of
+                true ->
+                    CallbackMod:handle_bad_header(upgrade, Arg);
+                false ->
+                    error_logger:error_msg("Invalid upgrade header", [])
+            end,
             deliver_xxx(Arg#arg.clisock, 400),
             exit(normal)
     end,
@@ -83,8 +95,13 @@ start(Arg, CallbackMod, Opts) ->
         ok ->
             ok;
         error ->
-            error_logger:error_msg("Expected origin ~p but found ~p",
-                                   [OriginOpt, Origin]),
+            case erlang:function_exported(CallbackMod, handle_bad_header, 2) of
+                true ->
+                    CallbackMod:handle_bad_header(origin, Arg);
+                false ->
+                    error_logger:error_msg("Expected origin ~p but found ~p",
+                                            [OriginOpt, Origin])
+            end,
             deliver_xxx(Arg#arg.clisock, 403),
             exit(normal)
     end,
@@ -105,10 +122,10 @@ start(Arg, CallbackMod, Opts) ->
     CliSock = Arg#arg.clisock,
     Res = case yaws_api:get_sslsocket(CliSock) of
               {ok, SslSocket} ->
-                  ssl:setopts(SslSocket, [{packet, raw}, {active, once}]),
+                  ssl:setopts(SslSocket, [{packet, raw}, {active, false}]),
                   ssl:controlling_process(SslSocket, OwnerPid);
               undefined ->
-                  inet:setopts(CliSock, [{packet, raw}, {active, once}]),
+                  inet:setopts(CliSock, [{packet, raw}, {active, false}]),
                   gen_tcp:controlling_process(CliSock, OwnerPid)
           end,
     case Res of
@@ -188,8 +205,8 @@ init([Arg, CbMod, Opts]) ->
 
 %% ----
 %% Skip all sync requests
-handle_call(_Req, _From, State) ->
-    {reply, ok, State, State#state.timeout}.
+handle_call(Req, From, State) ->
+    handle_callback(call, [State, Req, From]).
 
 
 %% ----
@@ -216,6 +233,7 @@ handle_cast(ok, #state{arg=Arg, cbinfo=CbInfo}=State) ->
                                  vsn       = WSVersion,
                                  frag_type = none},
             handshake(CliSock, WSKey, Protocol),
+            websocket_setopts(WSState, [{active, true}]),
 
             case CbInfo#cbinfo.open_fun of
                 undefined ->
@@ -265,6 +283,13 @@ handle_info({ssl, Socket, FirstPacket},
             #state{wsstate=#ws_state{sock={ssl, Socket}}}=State) ->
     handle_frames(FirstPacket, State);
 
+handle_info({ssl_error, _Socket, Error}, State) ->
+    Info = io_lib:format("ssl_error ~p", [Error]),
+    handle_abnormal_closure(State, iolist_to_binary(Info));
+handle_info({tcp_error, _Socket, Error}, State) ->
+    Info = io_lib:format("tcp_error ~p", [Error]),
+    handle_abnormal_closure(State, iolist_to_binary(Info));
+
 %% Abnormal socket closure: only if no Close frame was received or sent.
 handle_info({tcp_closed, Socket},
             #state{wsstate=#ws_state{sock=Socket}}=State) ->
@@ -273,7 +298,7 @@ handle_info({tcp_closed, Socket},
         State#state.close_timer /= undefined ->
             {stop, normal, State};
         true ->
-            handle_abnormal_closure(State)
+            handle_abnormal_closure(State, <<"tcp_closed">>)
     end;
 handle_info({ssl_closed, Socket},
             #state{wsstate=#ws_state{sock={ssl, Socket}}}=State) ->
@@ -282,7 +307,7 @@ handle_info({ssl_closed, Socket},
         State#state.close_timer /= undefined ->
             {stop, normal, State};
         true ->
-            handle_abnormal_closure(State)
+            handle_abnormal_closure(State, <<"ssl_closed">>)
     end;
 
 
@@ -294,18 +319,18 @@ handle_info(timeout, #state{close_timer=TRef}=State) when TRef /= undefined ->
 
 %% Keepalive timeout: send a ping frame and wait for any reply
 handle_info(timeout, #state{wait_pong_frame=false}=State) ->
-    error_logger:info_msg("Send ping frame", []),
+    % error_logger:info_msg("Send ping frame", []),
     GracePeriod = get_opts(keepalive_grace_period, State#state.opts),
     do_send(State#state.wsstate, {ping, <<>>}),
     {noreply, State#state{wait_pong_frame=true}, GracePeriod};
 
 %% Grace period timeout
 handle_info(timeout, #state{wait_pong_frame=true}=State) ->
-    error_logger:error_msg("endpoint gone away !", []),
+    % error_logger:error_msg("endpoint gone away !", []),
     State1 = State#state{wait_pong_frame=false},
     case get_opts(drop_on_timeout, State1#state.opts) of
-        true  -> handle_abnormal_closure(State1);
-        false -> handle_callback_info(timeout, State1)
+        true  -> handle_abnormal_closure(State1, <<"timeout">>);
+        false -> handle_callback(info, [State1, timeout])
     end;
 
 %% Close timeout: just shutdown the gen_server
@@ -318,7 +343,7 @@ handle_info(close, State) ->
 
 %% All other messages
 handle_info(Info, State) ->
-    handle_callback_info(Info, State).
+    handle_callback(info, [State, Info]).
 
 
 %% ----
@@ -381,13 +406,18 @@ get_callback_info(Mod) ->
                           true  -> handle_info;
                           false -> undefined
                       end,
+	    CallFun = case erlang:function_exported(Mod, handle_call, 3) of
+			  true -> handle_call;
+			  false -> undefined
+		      end,
             {ok, #cbinfo{module        = Mod,
                          init_fun      = InitFun,
                          terminate_fun = TerminateFun,
                          open_fun      = OpenFun,
                          msg_fun_1     = MsgFun1,
                          msg_fun_2     = MsgFun2,
-                         info_fun      = InfoFun}};
+                         info_fun      = InfoFun,
+			 call_fun      = CallFun}};
         {error, Reason} ->
             error_logger:error_msg("Cannot load callback module '~p': ~p",
                                    [Mod, Reason]),
@@ -425,7 +455,11 @@ get_opts(Key, Opts) ->
 
 check_origin(_Origin, any)       -> ok;
 check_origin(Actual,  Actual )   -> ok;
-check_origin(_Actual, _Expected) -> error.
+check_origin(Origin,  Allowed)   ->
+    case {lists:reverse(Origin), lists:reverse(Allowed)} of
+        {"." ++ RevAllowed, RevAllowed} -> ok;
+        _                               -> error
+    end.
 
 check_connection(undefined) ->
     error;
@@ -507,17 +541,26 @@ deliver_xxx(CliSock, Code, Hdrs) ->
 
 
 %% ----
-handle_frames(FirstPacket, #state{wsstate=WSState, opts=Opts}=State) ->
-    FrameInfos = unframe_active_once(WSState, FirstPacket, Opts),
+handle_frames(FirstPacket, #state{wsstate=WSState,
+                                  opts=Opts,
+                                  unused_stream=Unused}=State) ->
+    Stream = case Unused of
+        <<>> -> FirstPacket;
+        _    -> <<Unused/binary, FirstPacket/binary>>
+    end,
+    {FrameInfos, Remainder} = unframe(WSState, Stream, Opts),
+    State0 = State#state{unused_stream = Remainder},
     Result = case State#state.cbtype of
-                 basic    -> basic_messages(FrameInfos, State);
-                 advanced -> advanced_messages(FrameInfos, State)
+                 basic    -> basic_messages(FrameInfos, State0);
+                 advanced -> advanced_messages(FrameInfos, State0)
              end,
     case Result of
         {ok, State1, Timeout} ->
-            Last = lists:last(FrameInfos),
-            {noreply, State1#state{wsstate=Last#ws_frame_info.ws_state,
-                                  wait_pong_frame=false},
+            LastWsState = case FrameInfos of
+                [] -> WSState;
+                _  -> (lists:last(FrameInfos))#ws_frame_info.ws_state
+            end,
+            {noreply, State1#state{wsstate=LastWsState, wait_pong_frame=false},
              Timeout};
         {stop, State1} ->
             case State1#state.close_frame_received of
@@ -531,33 +574,37 @@ handle_frames(FirstPacket, #state{wsstate=WSState, opts=Opts}=State) ->
     end.
 
 
-handle_callback_info(Info, #state{cbinfo=CbInfo}=State) ->
-    case CbInfo#cbinfo.info_fun of
+handle_callback(Type, [#state{cbinfo=CbInfo}=State | Args]) ->
+    Cb = case Type of
+	info -> CbInfo#cbinfo.info_fun;
+	call -> CbInfo#cbinfo.call_fun
+    end,
+    case Cb of
         undefined ->
             {noreply, State, State#state.timeout};
-        InfoFun ->
+        CbFun ->
             {_, CbState} = State#state.cbstate,
             CbMod = CbInfo#cbinfo.module,
-            Res   = CbMod:InfoFun(Info, CbState),
+            Res   = (catch erlang:apply(CbMod, CbFun, Args ++ [CbState])),
             case handle_callback_result(Res, State) of
                 {ok, State1, Timeout} -> {noreply, State1, Timeout};
                 {stop, State1}        -> {stop, normal, State1}
             end
     end.
 
-handle_abnormal_closure(#state{wsstate=WSState}=State) ->
+handle_abnormal_closure(#state{wsstate=WSState}=State, Info) ->
     %% The only way we should get here is due to an abnormal close. Section
     %% 7.1.5 of RFC 6455 specifies 1006 as the connection close code for
     %% abnormal closure. It's also described in section 7.4.1.
     CloseStatus    = ?WS_STATUS_ABNORMAL_CLOSURE,
-    ClosePayload   = <<CloseStatus:16/big>>,
+    ClosePayload   = <<CloseStatus:16/big, Info/binary>>,
     CloseWSState   = WSState#ws_state{sock=undefined,frag_type=none},
     CloseFrameInfo = #ws_frame_info{fin         = 1,
                                     rsv         = 0,
                                     opcode      = close,
                                     masked      = 0,
                                     masking_key = <<>>,
-                                    length      = 2,
+                                    length      = byte_size(ClosePayload),
                                     payload     = ClosePayload,
                                     data        = ClosePayload,
                                     ws_state    = CloseWSState},
@@ -901,32 +948,6 @@ ws_version(Headers) ->
         V    -> {unsupported_version, V}
     end.
 
-buffer(Socket, Len, Buffered) ->
-    case Buffered of
-        <<_Expected:Len/binary>> -> % exactly enough
-            Buffered;
-        <<_Expected:Len/binary,_Extra/binary>> -> % more than expected
-            Buffered;
-        _ ->
-            %% not enough
-            More = do_recv(Socket, Len - byte_size(Buffered), []),
-            <<Buffered/binary, More/binary>>
-    end.
-
-do_recv(_, 0, Acc) ->
-    list_to_binary(lists:reverse(Acc));
-do_recv(Socket, Sz, Acc) ->
-    %% TODO: add configurable timeout to receive data
-    Res = case yaws_api:get_sslsocket(Socket) of
-              {ok, SslSocket} -> ssl:recv(SslSocket, Sz,  5000);
-              undefined       -> gen_tcp:recv(Socket, Sz, 5000)
-          end,
-    case Res of
-        {ok, Bin}       -> do_recv(Socket, Sz - byte_size(Bin), [Bin|Acc]);
-        {error, Reason} -> throw({tcp_error, Reason})
-    end.
-
-
 checks(Unframed) ->
     check_reserved_bits(Unframed).
 
@@ -958,12 +979,11 @@ check_reserved_opcode(_) ->
     ok.
 
 
-ws_frame_info(#ws_state{sock=Socket},
-              <<Fin:1, Rsv:3, Opcode:4, Masked:1, Len1:7, Rest/binary>>,
+ws_frame_info(<<Fin:1, Rsv:3, Opcode:4, Masked:1, Len1:7, Rest/binary>>,
               Opts) ->
     case check_control_frame(Len1, Opcode, Fin) of
         ok ->
-            case ws_frame_info_secondary(Socket, Masked, Len1, Rest, Opts) of
+            case ws_frame_info_secondary(Masked, Len1, Rest, Opts) of
                 {ws_frame_info_secondary,Length,MaskingKey,Payload,Excess} ->
                     FrameInfo = #ws_frame_info{fin=Fin,
                                                rsv=Rsv,
@@ -979,50 +999,54 @@ ws_frame_info(#ws_state{sock=Socket},
         Other ->
             Other
     end;
+ws_frame_info(_Packet, _Opts) ->
+    frame_incomplete.
 
-ws_frame_info(WSState = #ws_state{sock=Socket}, FirstPacket, Opts) ->
-    ws_frame_info(WSState, buffer(Socket, 2, FirstPacket), Opts).
 
-
-ws_frame_info_secondary(Socket, Masked, Len1, Rest, Opts) ->
+ws_frame_info_secondary(Masked, Len1, Rest, Opts) ->
     MaxLen = get_opts(max_frame_size, Opts),
     CloseIfUnmasked = get_opts(close_if_unmasked, Opts),
     MaskLength = case Masked of
                      0 -> 0;
                      1 -> 4
                  end,
-    case Len1 of
-        126 ->
-            <<Len:16, MaskingKey:MaskLength/binary, Rest2/binary>> =
-                buffer(Socket, MaskLength + 2 , Rest);
-        127 ->
-            <<Len:64, MaskingKey:MaskLength/binary, Rest2/binary>> =
-                buffer(Socket, MaskLength + 8 , Rest);
-        Len ->
-            <<MaskingKey:MaskLength/binary, Rest2/binary>> =
-                buffer(Socket, MaskLength, Rest)
+    FirstCase = case {Len1, Rest} of
+        {126, <<Len:16, MaskingKey:MaskLength/binary,
+                Payload:Len/binary, Excess/binary>>} ->
+            {Len, MaskingKey, Payload, Excess};
+        {127, <<Len:64, MaskingKey:MaskLength/binary,
+                Payload:Len/binary, Excess/binary>>} ->
+            {Len, MaskingKey, Payload, Excess};
+        {Len, <<MaskingKey:MaskLength/binary,
+                Payload:Len1/binary, Excess/binary>>} when Len < 126 ->
+            {Len, MaskingKey, Payload, Excess};
+        {126, <<Len:16, _/binary>>} ->
+            {Len, frame_incomplete};
+        {127, <<Len:64, _/binary>>} ->
+            {Len, frame_incomplete};
+        Len when Len < 126 ->
+            {Len, frame_incomplete};
+        _ ->
+            {unknown, frame_incomplete}
     end,
-    if
-        CloseIfUnmasked == true andalso MaskingKey == <<>> ->
+    case FirstCase of
+        {unknown, frame_incomplete} ->
+            frame_incomplete;
+        {Len0, _} when Len0 > MaxLen ->
+            error_logger:error_msg(
+                "Payload length ~p longer than max allowed of ~p",
+                [Len0, MaxLen]
+            ),
+            {fail_connection, ?WS_STATUS_MSG_TOO_BIG, <<"Frame too big">>};
+        {_, frame_incomplete} ->
+            frame_incomplete;
+        {_Len, <<>>, _Payload, _Excess} when CloseIfUnmasked == true ->
             error_logger:error_msg("Unmasked frame forbidden", []),
             {fail_connection, ?WS_STATUS_PROTO_ERROR,
              <<"Unmasked frame forbidden">>};
-        Len > MaxLen ->
-            error_logger:error_msg(
-              "Payload length ~p longer than max allowed of ~p",
-              [Len, MaxLen]
-             ),
-            {fail_connection, ?WS_STATUS_MSG_TOO_BIG, <<"Frame too big">>};
-        true ->
-            <<Payload:Len/binary, Excess/binary>> = buffer(Socket, Len, Rest2),
-            {ws_frame_info_secondary, Len, MaskingKey, Payload, Excess}
+        {Len0, MaskingKey0, Payload0, Excess0} ->
+            {ws_frame_info_secondary, Len0, MaskingKey0, Payload0, Excess0}
     end.
-
-unframe_active_once(WSState, FirstPacket, Opts) ->
-    Frames = unframe(WSState, FirstPacket, Opts),
-    websocket_setopts(WSState, [{active, once}]),
-    Frames.
-
 
 %% Returns all the WebSocket frames fully or partially contained in FirstPacket,
 %% reading exactly as many more bytes from Socket as are needed to finish
@@ -1032,21 +1056,26 @@ unframe_active_once(WSState, FirstPacket, Opts) ->
 %% your socket receive buffer.
 %%
 %% -> { #ws_state, [#ws_frame_info,...,#ws_frame_info] }
-unframe(_WSState, <<>>, _Opts) ->
-    [];
 unframe(WSState, FirstPacket, Opts) ->
+    unframe(WSState, FirstPacket, Opts, []).
+
+unframe(_WSState, <<>>, _Opts, Acc) ->
+    {lists:reverse(Acc), <<>>};
+unframe(WSState, FirstPacket, Opts, Acc) ->
     case unframe_one(WSState, FirstPacket, Opts) of
         {FrameInfo = #ws_frame_info{ws_state = NewWSState}, RestBin} ->
             %% Every new recursion uses the #ws_state from the calling
             %% recursion.
-            [FrameInfo | unframe(NewWSState, RestBin, Opts)];
+            unframe(NewWSState, RestBin, Opts, [FrameInfo | Acc]);
+        frame_incomplete ->
+            {lists:reverse(Acc), FirstPacket};
         Fail ->
-            [Fail]
+            {lists:reverse([Fail | Acc]), <<>>}
     end.
 
 %% -> {#ws_frame_info, RestBin} | {fail_connection, Reason}
 unframe_one(WSState, FirstPacket, Opts) ->
-    case catch ws_frame_info(WSState, FirstPacket, Opts) of
+    case catch ws_frame_info(FirstPacket, Opts) of
         {FrameInfo = #ws_frame_info{}, RestBin} ->
             Unmasked = mask(FrameInfo#ws_frame_info.masking_key,
                             FrameInfo#ws_frame_info.payload),
@@ -1061,11 +1090,14 @@ unframe_one(WSState, FirstPacket, Opts) ->
                 Else ->
                     Else
             end;
+        frame_incomplete ->
+            frame_incomplete;
         {tcp_error, Reason} ->
             %% FIXME: close the connection ?
-            error_logger:error_msg("Abnormal Closure: ~p", [Reason]),
+            % error_logger:error_msg("Abnormal Closure: ~p", [Reason]),
             CloseStatus    = ?WS_STATUS_ABNORMAL_CLOSURE,
-            ClosePayload   = <<CloseStatus:16/big>>,
+            CloseReason    = iolist_to_binary(io_lib:format("~p", [Reason])),
+            ClosePayload   = <<CloseStatus:16/big, CloseReason/binary>>,
             CloseWSState   = WSState#ws_state{sock=undefined,frag_type=none},
             {#ws_frame_info{fin         = 1,
                             rsv         = 0,

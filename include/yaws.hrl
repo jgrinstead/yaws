@@ -23,7 +23,6 @@
 -define(GC_USE_YAWS_SENDFILE,             1024).
 
 
-
 -define(GC_DEF, ?GC_FAIL_ON_BIND_ERR).
 
 -define(gc_has_tty_trace(GC),
@@ -150,6 +149,8 @@
 -define(SC_FCGI_LOG_APP_ERROR,  2048).
 -define(SC_FORWARD_PROXY,       4096).
 -define(SC_AUTH_SKIP_DOCROOT,   8192).
+-define(SC_EXPECT_PROXY_HEADER,16384).
+
 
 
 
@@ -181,6 +182,8 @@
         (((SC)#sconf.flags band ?SC_FORWARD_PROXY) /= 0)).
 -define(sc_auth_skip_docroot(SC),
         (((SC)#sconf.flags band ?SC_AUTH_SKIP_DOCROOT) /= 0)).
+-define(sc_expect_proxy_header(SC),
+        (((SC)#sconf.flags band ?SC_EXPECT_PROXY_HEADER) /= 0)).
 
 
 -define(sc_set_access_log(SC, Bool),
@@ -211,6 +214,8 @@
         SC#sconf{flags = yaws:flag(SC#sconf.flags, ?SC_FORWARD_PROXY, Bool)}).
 -define(sc_set_auth_skip_docroot(SC, Bool),
         SC#sconf{flags = yaws:flag(SC#sconf.flags,?SC_AUTH_SKIP_DOCROOT,Bool)}).
+-define(sc_set_expect_proxy_header(SC, Bool),
+        SC#sconf{flags = yaws:flag(SC#sconf.flags,?SC_EXPECT_PROXY_HEADER,Bool)}).
 
 
 %% server conf
@@ -247,6 +252,7 @@
           errormod_401 = yaws_outmod,   % the default 401 error module
           errormod_404 = yaws_outmod,   % the default 404 error module
           errormod_crash = yaws_outmod, % use the same module for crashes
+	  errormod_conn = yaws_server,	% handling connection errors
           arg_rewrite_mod = yaws,
           logger_mod = yaws_log,        % access/auth logging module
           opaque = [],                  % useful in embedded mode

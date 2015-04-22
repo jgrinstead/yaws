@@ -11,6 +11,7 @@
 -include("../include/yaws_api.hrl").
 -include("yaws_debug.hrl").
 -export([out/1]).
+-export([out404/1]).
 
 
 %% reverse proxy implementation.
@@ -45,7 +46,21 @@
 
 %% Initialize the connection to the backend server. If an error occurred, return
 %% an error 404.
-out(#arg{req=Req, headers=Hdrs, state=#proxy_cfg{url=URL}=State}=Arg) ->
+out(#arg{req=Req, headers=Hdrs, state=#proxy_cfg{url=ConfURL}=State}=Arg) ->
+    URL = case State#proxy_cfg.intercept_mod of
+        undefined ->
+            ConfURL;
+        InterceptMod ->
+            case catch InterceptMod:rewrite_url(ConfURL) of
+                {ok, NewURL} ->
+                    NewURL;
+                InterceptError ->
+                    error_logger:error_msg(
+                        "revproxy intercept module ~p:rewrite_url failed: ~p~n",
+                        [InterceptMod, InterceptError]),
+                    exit({error, intercept_mod})
+            end
+    end,
     case connect(URL) of
         {ok, Sock, Type} ->
             ?Debug("Connection established on ~p: Socket=~p, Type=~p~n",
@@ -61,7 +76,7 @@ out(#arg{req=Req, headers=Hdrs, state=#proxy_cfg{url=URL}=State}=Arg) ->
             out(Arg#arg{state=RPState});
         _ERR ->
             ?Debug("Connection failed: ~p~n", [_ERR]),
-            out404(Arg)
+            outXXX(503, Arg)
     end;
 
 
@@ -515,8 +530,10 @@ recv_blocks(YawsPid, #arg{state=RPState}=Arg, BlockCnt, BlockSz, LastBlock) ->
         {ok, Data} ->
             ?Debug("Response content received from the backend server : "
                    "~p bytes~n", [size(Data)]),
-            ok = yaws_api:stream_process_deliver(Arg#arg.clisock, Data),
-            recv_blocks(YawsPid, Arg, BlockCnt-1, BlockSz, LastBlock);
+            case yaws_api:stream_process_deliver(Arg#arg.clisock, Data) of
+		ok -> recv_blocks(YawsPid, Arg, BlockCnt-1, BlockSz, LastBlock);
+		_ -> close(RPState)
+	    end;
         {error, Reason} ->
             ?Debug("TCP error: ~p~n", [Reason]),
             yaws_api:stream_process_end(closed, YawsPid),
@@ -689,7 +706,20 @@ get_connection_status(Version, ReqHdrs, RespHdrs) ->
 rewrite_request(RPState, Req) ->
     ?Debug("Request path to rewrite:  ~p~n", [Req#http_request.path]),
     {abs_path, Path} = Req#http_request.path,
-    NewPath = strip_prefix(Path, RPState#revproxy.prefix),
+    NewPath = case RPState#revproxy.intercept_mod of
+        undefined ->
+            strip_prefix(Path, RPState#revproxy.prefix);
+        InterceptMod ->
+            case catch InterceptMod:rewrite_path(RPState#revproxy.prefix, Req, Path) of
+                {ok, PathRewritten} ->
+                    PathRewritten;
+                InterceptError ->
+                    error_logger:error_msg(
+                        "revproxy intercept module ~p:rewrite_url failed: ~p~n",
+                        [InterceptMod, InterceptError]),
+                    exit({error, intercept_mod})
+            end
+    end,
     ?Debug("New Request path: ~p~n", [NewPath]),
     Req#http_request{path = {abs_path, NewPath}}.
 

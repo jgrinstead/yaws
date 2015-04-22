@@ -30,7 +30,8 @@
          stats/0,
          gs_status/0,
          listen_port/1,
-         ssi/3,ssi/5,ssi/6
+         ssi/3,ssi/5,ssi/6,
+	 conn_read_error/4
         ]).
 
 %% internal exports
@@ -452,7 +453,7 @@ terminate(_Reason, State) ->
 do_listen(GC, SC) ->
     case SC#sconf.ssl of
         undefined ->
-            {nossl, undefined, gen_tcp_listen(SC#sconf.port, listen_opts(SC))};
+            {nossl, undefined, gen_tcp_listen(SC#sconf.port, listen_opts(GC, SC))};
         SSL ->
             {ssl, certinfo(SSL),
              ssl_listen(SC#sconf.port, ssl_listen_opts(GC, SC, SSL))}
@@ -895,7 +896,7 @@ call_start_mod(SC) ->
             end
     end.
 
-listen_opts(SC) ->
+listen_opts(_GC, SC) ->
     InetType = if
                    is_tuple( SC#sconf.listen), size( SC#sconf.listen) == 8 ->
                        [inet6];
@@ -1061,8 +1062,9 @@ acceptor0(GS, Top) ->
                 true ->
                     ok
             end,
-            {IP,Port} = peername(Client, GS#gs.ssl),
             put(trace_filter, yaws_trace:get_filter()),
+            {IP,Port} = peername(Client, GS#gs.ssl),
+	    erase(request_proxy_ip_port),
             Res = (catch aloop(Client, {IP,Port}, GS,  0)),
             %% Skip closing the socket, as required by web sockets & stream
             %% processes.
@@ -1193,11 +1195,26 @@ aloop(CliSock, {IP,Port}=IPPort, GS, Num) ->
             SC = pick_sconf(GS#gs.gconf, H, GS#gs.group),
             put(outh, #outh{}),
             put(sc, SC),
+            {PeerIP,PeerPort} = case {?sc_expect_proxy_header(SC), get(request_proxy_ip_port)} of
+				    {true, undefined} ->
+					error_logger:format("PROXY header missing on connection", []),
+					error_logger:format("Headers = ~s~n", [?format_record(H, headers)]),
+					error_logger:format("Request = ~s~n", [?format_record(Req, http_request)]),
+					exit(normal);
+				    {true, ProxyIPPort} ->
+					ProxyIPPort;
+				    {false, undefined} ->
+					IPPort;
+				    _ ->
+					error_logger:format("Ignoring extraneous PROXY header", []),
+					IPPort
+				end,
+            PeerIPPort = {PeerIP,PeerPort},
             DispatchResult = case SC#sconf.dispatch_mod of
                                  undefined ->
                                      continue;
                                  DispatchMod ->
-                                     Arg = make_arg(SC, CliSock, IPPort,
+                                     Arg = make_arg(SC, CliSock, PeerIPPort,
                                                     H, Req, undefined),
                                      ok = yaws:setopts(CliSock,
                                                        [{packet, raw},
@@ -1210,7 +1227,7 @@ aloop(CliSock, {IP,Port}=IPPort, GS, Num) ->
                     erase_transients(),
                     case exceed_keepalive_maxuses(GS, Num) of
                         true  -> {ok, Num+1};
-                        false -> aloop(CliSock, IPPort, GS, Num+1)
+                        false -> aloop(CliSock, PeerIPPort, GS, Num+1)
                     end;
                 closed ->
                     %% Dispatcher closed the socket
@@ -1222,18 +1239,18 @@ aloop(CliSock, {IP,Port}=IPPort, GS, Num) ->
                     ?Debug("Headers = ~s~n", [?format_record(H, headers)]),
                     ?Debug("Request = ~s~n",
                            [?format_record(Req, http_request)]),
-                    run_trace_filter(GS, IP, Req, H),
+                    run_trace_filter(GS, PeerIP, Req, H),
                     yaws_stats:hit(),
                     check_keepalive_maxuses(GS, Num),
-                    Call = case yaws_shaper:check(SC, IP) of
+                    Call = case yaws_shaper:check(SC, PeerIP) of
                                allow ->
                                    call_method(Req#http_request.method,CliSock,
-                                               IPPort,Req,H);
+                                               PeerIPPort,Req,H);
                                {deny, Status, Msg} ->
                                    deliver_xxx(CliSock, Req, Status, Msg)
                            end,
                     Call2 = fix_keepalive_maxuses(Call),
-                    handle_method_result(Call2, CliSock, IPPort,
+                    handle_method_result(Call2, CliSock, PeerIPPort,
                                          GS, Req, H, Num)
             end;
         closed ->
@@ -1318,7 +1335,14 @@ erase_transients() ->
     if I == undefined ->
             ok;
        is_list(I) ->
+	    Proxy = get(request_proxy_ip_port),
             erase(),
+	    case Proxy of
+		undefined ->
+		    ok;
+		_ ->
+		    put(request_proxy_ip_port, Proxy)
+	    end,
             %% Need to keep init_db in case we do not enter aloop (i.e. init:db)
             %% again as R12B-5 requires proc_lib keys in dict while exiting...
             put(init_db, I),
@@ -1399,7 +1423,6 @@ peername(CliSock, nossl) ->
         {ok, Res} -> Res;
         _         -> {unknown, unknown}
     end.
-
 
 deepforeach(_F, []) ->
     ok;
@@ -1657,10 +1680,10 @@ body_method(CliSock, IPPort, Req, Head) ->
                       Int_len == 0 ->
                           <<>>;
                       PPS < Int_len ->
-                          {partial, get_client_data(CliSock, PPS,
+                          {partial, get_client_data(CliSock, IPPort, PPS,
                                                     yaws:is_ssl(SC))};
                       true ->
-                          get_client_data(CliSock, Int_len,
+                          get_client_data(CliSock, IPPort, Int_len,
                                           yaws:is_ssl(SC))
                   end;
               Len when PPS == nolimit ->
@@ -1671,7 +1694,7 @@ body_method(CliSock, IPPort, Req, Head) ->
                       Int_len == 0 ->
                           <<>>;
                       true ->
-                          get_client_data(CliSock, Int_len,
+                          get_client_data(CliSock, IPPort, Int_len,
                                           yaws:is_ssl(SC))
                   end
           end,
@@ -2268,6 +2291,7 @@ handle_ut(CliSock, ARG, UT = #urltype{type = regular}, _N) ->
                                 false ->
                                     yaws:outh_set_static_headers
                                       (Req, UT, H, Range),
+                                    maybe_set_page_options(),
                                     Do_deliver()
                             end
                     end
@@ -2745,19 +2769,24 @@ del_old_files(_GC, [{_FileAtom, spec, _Mtime1, Spec, _}]) ->
       end, Spec).
 
 
-get_client_data(CliSock, Len, SSlBool) ->
-    get_client_data(CliSock, Len, [], SSlBool).
+get_client_data(CliSock, IPPort, Len, SSlBool) ->
+    get_client_data(CliSock, IPPort, Len, [], SSlBool).
 
-get_client_data(_CliSock, 0, Bs, _SSlBool) ->
+get_client_data(_CliSock, _IPPort, 0, Bs, _SSlBool) ->
     list_to_binary(Bs);
-get_client_data(CliSock, Len, Bs, SSlBool) ->
+get_client_data(CliSock, IPPort, Len, Bs, SSlBool) ->
     case yaws:cli_recv(CliSock, Len, SSlBool) of
         {ok, B} ->
-            get_client_data(CliSock, Len-size(B), [Bs,B], SSlBool);
-        _Other ->
-            error_logger:format("get_client_data: ~p~n", [_Other]),
+            get_client_data(CliSock, IPPort, Len-size(B), [Bs,B], SSlBool);
+        Other ->
+	    SC = get(sc),
+	    apply(SC#sconf.errormod_conn, conn_read_error, [CliSock, IPPort, Len, Other]),
             exit(normal)
     end.
+
+conn_read_error (_CliSock, _IPPort, _ReadLen, Err) ->
+    error_logger:format("get_client_data: ~p~n", [Err]).
+
 
 %% not nice to support this for ssl sockets
 get_chunked_client_data(CliSock,SSL) ->
@@ -2853,6 +2882,8 @@ deliver_dyn_part(CliSock,                       % essential params
             Priv = deliver_accumulated(Arg, CliSock, undefined, stream),
             wait_for_streamcontent_pid(Priv, CliSock, Pid);
         {websocket, CallbackMod, Opts} ->
+            {IP,_} = Arg#arg.client_ip_port,
+            maybe_access_log(IP, Arg#arg.req, Arg#arg.headers),
             %% The handshake passes control over the socket to OwnerPid
             %% and terminates the Yaws worker!
             yaws_websockets:start(Arg, CallbackMod, Opts);
@@ -3788,10 +3819,10 @@ get_more_post_data(CliSock, PPS, ARG) ->
         Len ->
             Int_len = list_to_integer(Len),
             if N + PPS < Int_len ->
-                    Bin = get_client_data(CliSock, N, yaws:is_ssl(SC)),
+                    Bin = get_client_data(CliSock, ARG#arg.client_ip_port, N, yaws:is_ssl(SC)),
                     {partial, Bin};
                true ->
-                    get_client_data(CliSock, Int_len - PPS,
+                    get_client_data(CliSock, ARG#arg.client_ip_port, Int_len - PPS,
                                     yaws:is_ssl(SC))
             end
     end.
@@ -3936,6 +3967,13 @@ deliver_large_file(CliSock,  _Req, UT, Range) ->
 send_file(CliSock, Path, all, undefined) when is_port(CliSock) ->
     ?Debug("send_file(~p,~p,no ...)~n", [CliSock, Path]),
     Size = yaws_sendfile:send(CliSock, Path),
+    case Size of
+	{ok, _Bytes} ->
+	    ok;
+	Err ->
+	    ?Debug("send_file(~p,~p): ~p~n", [CliSock, Path, Err]),
+	    Err %% Plopped here because otherwise it doesn't exist without DEBUG
+    end,
     yaws_stats:sent(Size);
 send_file(CliSock, Path, all, undefined) ->
     ?Debug("send_file(~p,~p,no ...)~n", [CliSock, Path]),
@@ -3955,6 +3993,13 @@ send_file(CliSock, Path, all, Priv) ->
     send_file(CliSock, Fd, Priv);
 send_file(CliSock, Path,  {fromto, From, To, _Tot}, _) when is_port(CliSock) ->
     Size = yaws_sendfile:send(CliSock, Path, From, (To-From+1)),
+    case Size of
+	{ok, _Bytes} ->
+	    ok;
+	Err ->
+	    ?Debug("send_file(~p,~p): ~p~n", [CliSock, Path, Err]),
+	    Err %% Plopped here because otherwise it doesn't exist without DEBUG
+    end,
     yaws_stats:sent(Size);
 send_file(CliSock, Path,  {fromto, From, To, _Tot}, _) ->
     {ok, Fd} = file:open(Path, [raw, binary, read]),

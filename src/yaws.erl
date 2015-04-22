@@ -611,6 +611,7 @@ setup_sconf(SL, SC) ->
                                         SC#sconf.errormod_404),
            errormod_crash        = lkup(errormod_crash, SL,
                                         SC#sconf.errormod_crash),
+	   errormod_conn	 = lkup(errormod_conn, SL, SC#sconf.errormod_conn),
            arg_rewrite_mod       = lkup(arg_rewrite_mod, SL,
                                         SC#sconf.arg_rewrite_mod),
            logger_mod            = lkup(logger_mod, SL, SC#sconf.logger_mod),
@@ -663,6 +664,8 @@ set_sc_flags([{forward_proxy, Bool}|T], Flags) ->
     set_sc_flags(T, flag(Flags, ?SC_FORWARD_PROXY, Bool));
 set_sc_flags([{auth_skip_docroot, Bool}|T], Flags) ->
     set_sc_flags(T, flag(Flags, ?SC_AUTH_SKIP_DOCROOT, Bool));
+set_sc_flags([{expect_proxy_header, Bool}|T], Flags) ->
+    set_sc_flags(T, flag(Flags, ?SC_EXPECT_PROXY_HEADER, Bool));
 set_sc_flags([_Unknown|T], Flags) ->
     error_logger:format("Unknown and unhandled flag ~p~n", [_Unknown]),
     set_sc_flags(T, Flags);
@@ -2258,9 +2261,9 @@ headers_to_str(Headers) ->
 
 
 setopts(Sock, Opts, nossl) ->
-    ok = inet:setopts(Sock, Opts);
+    inet:setopts(Sock, Opts);
 setopts(Sock, Opts, ssl) ->
-    ok = ssl:setopts(Sock, Opts).
+    ssl:setopts(Sock, Opts).
 
 do_http_get_headers(CliSock, SSL) ->
     case http_recv_request(CliSock,SSL) of
@@ -2284,6 +2287,12 @@ do_http_get_headers(CliSock, SSL) ->
 http_recv_request(CliSock, SSL) ->
     setopts(CliSock, [{packet, http}, {packet_size, 16#4000}], SSL),
     case do_recv(CliSock, 0,  SSL) of
+        {ok, #http_request{path={abs_path, [$/|_]}} = R} ->
+            R;
+        {ok, #http_request{path={abs_path, RelPath}} = R} ->
+            %% There's a bug in OTP where a single, non-"/" codepoint will be
+            %% labeled as an absolute path.
+            R#http_request{path=RelPath};
         {ok, R} when is_record(R, http_request) ->
             R;
         {ok, R} when is_record(R, http_response) ->
@@ -2292,8 +2301,16 @@ http_recv_request(CliSock, SSL) ->
             http_recv_request(CliSock, SSL);
         {_, {http_error, "\n"}} ->
             http_recv_request(CliSock,SSL);
-        {_, {http_error, _}} ->
-            bad_request;
+	{_, {http_error, Line}} ->
+	    case parse_proxy_header(Line) of
+		{ok, {Ip, Port}} ->
+		    put(request_proxy_ip_port, {Ip,Port}),
+		    http_recv_request(CliSock,SSL);
+		_ ->
+		    bad_request
+	    end;
+	{error, ebadf} ->
+	    closed;
         {error, closed} ->
             closed;
         {error, timeout} ->
@@ -2404,7 +2421,18 @@ http_collect_headers(CliSock, Req, H, SSL, Count) when Count < 1000 ->
 http_collect_headers(_CliSock, Req, _H, _SSL, _Count)  ->
     {error, {too_many_headers, Req}}.
 
-
+parse_proxy_header (L) ->
+    case string:tokens(L, " \r\n") of
+	["PROXY", AF, RAddr, _LAddr, RPort, _LPort] when AF =:= "TCP4" orelse AF =:= "TCP6" ->
+	    case catch {inet_parse:address(RAddr), list_to_integer(RPort)} of
+		{{ok, RIP}, RP} when is_integer(RP) ->
+		    {ok, {RIP, RP}};
+		_ ->
+		    {error, invalid_header}
+	    end;
+	_ ->
+	    {error, invalid_header}
+    end.
 
 parse_auth(Orig = "Basic " ++ Auth64) ->
     case decode_base64(Auth64) of

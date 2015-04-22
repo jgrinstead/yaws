@@ -337,8 +337,14 @@ dnl   - HAVE_ERLANG_SENDFILE: say if file:sendfile/5 exists
 HAVE_SENDFILE=false
 HAVE_ERLANG_SENDFILE=false
 
+AC_ARG_ENABLE(sendfile, AS_HELP_STRING([--disable-sendfile], [disables use of sendfile system call]),
+                        [ test "$enableval" = no && NO_HAVE_SENDFILE=true ])
+
 dnl Disabled because the yaws driver is not compiled for windows
-if test "$WINDOWS" = true; then
+if test "x$NO_HAVE_SENDFILE" = "xtrue"; then
+        AC_MSG_CHECKING([for sendfile])
+        AC_MSG_RESULT([disabled])
+elif test "$WINDOWS" = true; then
         AC_MSG_CHECKING([for sendfile])
         AC_MSG_RESULT([no])
 else
@@ -348,14 +354,20 @@ fi
 
 
 AC_MSG_CHECKING([for file:sendfile/5])
-file_sendfile=`"${ERL}" -noshell -eval 'code:ensure_loaded(file), io:format("~p~n",[[erlang:function_exported(file,sendfile,5)]]), erlang:halt().' | tail -1`
-if test "$file_sendfile" = true; then
-        AX_COMPARE_VERSION([${ERLANG_ERTS_VER}], [ge], [5.9.1],
-            [AC_MSG_RESULT([yes])
-             HAVE_ERLANG_SENDFILE=true],
-            [AC_MSG_RESULT([no])])
+AC_ARG_ENABLE(file-sendfile, AS_HELP_STRING([--disable-file-sendfile], [disables use of erlang file:sendfile]),
+                        [ test "$enableval" = no && NO_FILE_SENDFILE=true ])
+if test "x$NO_FILE_SENDFILE" = "xtrue"; then
+        AC_MSG_RESULT([disabled])
 else
-        AC_MSG_RESULT([no])
+    file_sendfile=`"${ERL}" -noshell -eval 'code:ensure_loaded(file), io:format("~p~n",[[erlang:function_exported(file,sendfile,5)]]), erlang:halt().' | tail -1`
+    if test "$file_sendfile" = true; then
+            AX_COMPARE_VERSION([${ERLANG_ERTS_VER}], [ge], [5.9.1],
+                [AC_MSG_RESULT([yes])
+                 HAVE_ERLANG_SENDFILE=true],
+                [AC_MSG_RESULT([no])])
+    else
+            AC_MSG_RESULT([no])
+    fi
 fi
 AM_CONDITIONAL(HAVE_SENDFILE, [test "x$HAVE_SENDFILE" = "xtrue"])
 AM_CONDITIONAL(HAVE_ERLANG_SENDFILE, [test "x$HAVE_ERLANG_SENDFILE" = "xtrue"])

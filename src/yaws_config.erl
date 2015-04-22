@@ -1488,6 +1488,10 @@ fload(FD, server, GC, C, Lno, Chars) ->
             C1 = C#sconf{errormod_401 = list_to_atom(Module)},
             fload(FD, server, GC, C1, Lno+1, ?NEXTLINE);
 
+        ["errormod_conn", '=' , Module] ->
+            C1 = C#sconf{errormod_conn = list_to_atom(Module)},
+            fload(FD, server, GC, C1, Lno+1, ?NEXTLINE);
+
         ["arg_rewrite_mod", '=', Module] ->
             C1 = C#sconf{arg_rewrite_mod = list_to_atom(Module)},
             fload(FD, server, GC, C1, Lno+1, ?NEXTLINE);
@@ -1625,6 +1629,14 @@ fload(FD, server, GC, C, Lno, Chars) ->
             C1 = C#sconf{shaper = list_to_atom(Module)},
             fload(FD, server, GC, C1, Lno+1, ?NEXTLINE);
 
+        ["expect_proxy_header",'=',Bool] ->
+            case is_bool(Bool) of
+                {true, Val} ->
+                    C1 = ?sc_set_expect_proxy_header(C, Val),
+                    fload(FD, server, GC, C1, Lno+1, ?NEXTLINE);
+                false ->
+                    {error, ?F("Expect true|false at line ~w", [Lno])}
+            end;
 
         ["default_type", '=', MimeType] ->
             case parse_mime_types_info(default_type, MimeType,

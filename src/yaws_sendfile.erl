@@ -16,7 +16,6 @@
 %% supported)
 -export([bytes_to_transfer/3]).
 
-
 -ifdef(HAVE_SENDFILE).
 
 -behavior(gen_server).
@@ -79,15 +78,16 @@ send(Out, Filename, Offset, Count) ->
     ChunkSize      = GC#gconf.large_file_chunk_size,
     ErlangSendFile = ?gc_use_erlang_sendfile(GC),
     YawsSendFile   = ?gc_use_yaws_sendfile(GC),
-    if
+    LogRes = if
         ErlangSendFile ->
             erlang_sendfile(Out, Filename, Offset, Count, ChunkSize);
         YawsSendFile ->
             yaws_sendfile(Out, Filename, Offset, Count, ChunkSize);
         true ->
             compat_send(Out, Filename, Offset, Count, ChunkSize)
-    end.
-
+    end,
+    put(yaws_sendfile_results, LogRes),
+    LogRes.
 
 bytes_to_transfer(Filename, Offset, Count) ->
     case Count of
@@ -101,8 +101,6 @@ bytes_to_transfer(Filename, Offset, Count) ->
         _ ->
             {error, badarg}
     end.
-
-
 
 -ifdef(HAVE_ERLANG_SENDFILE).
 
@@ -260,7 +258,7 @@ loop_send(Fd, ChunkSize, {ok, Bin}, Out, all, BytesSent) ->
             loop_send(Fd, ChunkSize, file:read(Fd, ChunkSize), Out, all,
                       BytesSent+size(Bin));
         Err ->
-            Err
+            {send_error, Err, BytesSent} 
     end;
 loop_send(_Fd, _ChunkSize, eof, _Out, _, BytesSent) ->
     {ok, BytesSent};
@@ -272,18 +270,19 @@ loop_send(Fd, ChunkSize, {ok, Bin}, Out, Count, BytesSent) ->
                     loop_send(Fd, ChunkSize, file:read(Fd, ChunkSize),
                               Out, Count-Sz, BytesSent+Sz);
                 Err ->
-                    Err
+                    {send_error, Err, BytesSent}
             end;
        Sz == Count ->
             case gen_tcp:send(Out, Bin) of
                 ok  -> {ok, BytesSent+Sz};
-                Err -> Err
+                Err -> 
+                    {send_error, Err, BytesSent}
             end;
        Sz > Count ->
             <<Deliver:Count/binary , _/binary>> = Bin,
             case gen_tcp:send(Out, Deliver) of
                 ok  -> {ok, BytesSent+Count};
-                Err -> Err
+                Err -> {send_error, Err, BytesSent}
             end
     end;
 loop_send(_Fd, _, Err, _, _, _) ->
