@@ -467,7 +467,12 @@ parse_multi(Data, #mp_parse_state{state=headers}=ParseState, Acc, Name, Hdrs) ->
             HdrValStr = binary_to_list(HdrVal),
             case yaws:to_lower(binary_to_list(Hdr)) of
                 "content-disposition" ->
-                    "form-data"++Params = HdrValStr,
+                    Params = case HdrValStr of
+                                 "form-data"++FoundParams ->
+                                     FoundParams;
+                                 "attachment"++FoundParams ->
+                                     FoundParams
+                             end,
                     Parameters = parse_arg_line(Params),
                     {_, NewName} = lists:keyfind("name", 1, Parameters),
                     parse_multi(Rest, ParseState, Acc,
