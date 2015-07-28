@@ -453,13 +453,18 @@ get_opts(Key, Opts) ->
     {Key, Value} = lists:keyfind(Key, 1, Opts),
     Value.
 
-check_origin(_Origin, any)       -> ok;
-check_origin(Actual,  Actual )   -> ok;
-check_origin(Origin,  Allowed)   ->
-    case {lists:reverse(Origin), lists:reverse(Allowed)} of
-        {"." ++ RevAllowed, RevAllowed} -> ok;
-        _                               -> error
-    end.
+check_origin(_Origin, any                ) -> ok;
+check_origin(Actual,  {any_of, Allowance}) -> check_origins(Actual, Allowance);
+check_origin(Actual,  Actual             ) -> ok;
+check_origin(_Origin, _Allowed           ) -> error.
+
+check_origins(Actual, [Allowed | Allowance]) ->
+    case check_origin(Actual, Allowed) of
+        ok    -> ok;
+        error -> check_origins(Actual, Allowance)
+    end;
+check_origins(_Origin, []) ->
+    error.
 
 check_connection(undefined) ->
     error;
