@@ -1188,7 +1188,9 @@ aloop(CliSock, {IP,Port}=IPPort, GS, Num) ->
             SC = pick_sconf(GS#gs.gconf, #headers{}, GS#gs.group),
             put(sc, SC),
             put(outh, #outh{}),
-            deliver_431(CliSock, ReqTooMany);
+            ReqTooManyRes = deliver_431(CliSock, ReqTooMany),
+            handle_method_result(ReqTooManyRes, CliSock, IPPort,
+                                 GS, ReqTooMany, #headers{}, Num);
         {Req0, H0} when Req0#http_request.method /= bad_request ->
             {Req, H} = fix_abs_uri(Req0, H0),
             ?Debug("{Req, H} = ~p~n", [{Req, H}]),
